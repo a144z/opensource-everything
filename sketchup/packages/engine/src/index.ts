@@ -11,6 +11,7 @@ export * from "./fit.js";
 export * from "./fuzzy.js";
 export * from "./history.js";
 export * from "./io.js";
+export * from "./marquee.js";
 export * from "./resolve.js";
 export * from "./session.js";
 export * from "./views.js";

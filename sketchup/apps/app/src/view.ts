@@ -2,7 +2,16 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { Aabb, MeshData, Vec3 } from "@apexus/geometry";
-import type { Session, Solid, SolidId } from "@apexus/engine";
+import {
+  dragBox,
+  dragDirection,
+  isDegenerate,
+  selectByDrag,
+  type ScreenBox,
+  type Session,
+  type Solid,
+  type SolidId,
+} from "@apexus/engine";
 
 /**
  * Renderer layer (ADR 0001). Holds no truth: every mesh here is derived from a
@@ -34,6 +43,8 @@ export type PickHit =
 export interface ViewEvents {
   onPick(hit: PickHit, additive: boolean, copy?: boolean): void;
   onHover(point: Vec3 | null): void;
+  /** A rectangle drag finished without hitting anything: ids the drag selected. */
+  onMarquee(ids: readonly SolidId[], additive: boolean): void;
   /** Gizmo finished a drag: the object's new world matrix, column-major. */
   onGizmoCommit(id: SolidId, matrix: readonly number[]): void;
 }
@@ -67,6 +78,8 @@ export class View {
   #downAt: { x: number; y: number } | null = null;
   #gizmoStart: { id: SolidId; matrix: number[] } | null = null;
   #shift = false;
+  /** Live drag rectangle; created lazily so the overlay sits over the canvas. */
+  #marqueeEl: HTMLElement | null = null;
 
   tool: Tool = "select";
 
@@ -123,8 +136,18 @@ export class View {
     this.#resize(container);
 
     const dom = this.renderer.domElement;
+    // The marquee lives beside the canvas inside the viewport, so it scrolls
+    // and clips with it rather than floating over the whole window.
+    const overlay = document.createElement("div");
+    overlay.id = "marquee";
+    overlay.hidden = true;
+    // The rectangle must never swallow the pointer events that end the drag.
+    overlay.addEventListener("pointerdown", (e) => e.stopPropagation());
+    dom.parentElement?.append(overlay);
+    this.#marqueeEl = overlay;
     dom.addEventListener("pointerdown", this.#onPointerDown);
-    dom.addEventListener("pointerup", this.#onPointerUp);
+    // Window-level, so a drag that leaves the canvas still ends cleanly.
+    window.addEventListener("pointerup", this.#onPointerUp);
     dom.addEventListener("pointermove", this.#onPointerMove);
     dom.addEventListener("contextmenu", (e) => e.preventDefault());
 
@@ -140,6 +163,7 @@ export class View {
     this.tool = tool;
     this.gizmo.enabled = tool === "select";
     this.renderer.domElement.style.cursor = tool === "select" ? "default" : "crosshair";
+    this.#hideMarquee();
     this.#dirty = true;
   }
 
@@ -436,20 +460,104 @@ export class View {
   };
 
   #onPointerDown = (e: PointerEvent): void => {
-    this.#downAt = { x: e.clientX, y: e.clientY };
+    this.#downAt = this.#local(e);
   };
 
   #onPointerUp = (e: PointerEvent): void => {
     const down = this.#downAt;
     this.#downAt = null;
+    this.#hideMarquee();
     if (!down || e.button !== 0) return;
-    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+    const to = this.#local(e);
+    // A drag is either a marquee or a camera orbit, never a pick.
+    if (Math.hypot(to.x - down.x, to.y - down.y) > 4) {
+      if (this.tool === "select") this.#finishMarquee(down, to, e.shiftKey);
+      return;
+    }
     const hit = this.pick(e.clientX, e.clientY);
     if (hit) this.#events.onPick(hit, e.shiftKey, e.ctrlKey || e.metaKey);
   };
 
+  /** Screen position relative to the canvas, for the live drag rectangle. */
+  #local(e: PointerEvent): { x: number; y: number } {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  /**
+   * Where a solid sits on screen, as a pixel box around its eight corners.
+   * `null` when any corner is behind the camera: a solid the user cannot see
+   * must never be caught by a rectangle.
+   */
+  screenBox(id: SolidId): ScreenBox | null {
+    const b = this.#session.boundsOf(id);
+    const r = this.renderer.domElement.getBoundingClientRect();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const corner = new THREE.Vector3(
+        i & 1 ? b.max[0] : b.min[0],
+        i & 2 ? b.max[1] : b.min[1],
+        i & 4 ? b.max[2] : b.min[2],
+      );
+      // Behind the camera (or on the near plane) is not a visible point.
+      const depth = corner.clone().applyMatrix4(this.camera.matrixWorldInverse).z;
+      if (depth > -this.camera.near) return null;
+      corner.project(this.camera);
+      const x = ((corner.x + 1) / 2) * r.width;
+      const y = ((1 - corner.y) / 2) * r.height;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  #finishMarquee(from: { x: number; y: number }, to: { x: number; y: number }, shift: boolean): void {
+    const box = dragBox(from.x, from.y, to.x, to.y);
+    if (isDegenerate(box)) return;
+    const direction = dragDirection(from.x, to.x);
+    const ids = selectByDrag(
+      [...this.#session.document.solids.keys()].filter(
+        (id) => !this.#session.document.solids.get(id)!.meta.hidden,
+      ),
+      box,
+      direction,
+      (id) => this.screenBox(id as SolidId),
+    );
+    this.#events.onMarquee(ids as SolidId[], shift);
+  }
+
+  /** Draw the live drag rectangle, tinted to say which rule it will apply. */
+  #showMarquee(ax: number, ay: number, bx: number, by: number): void {
+    const el = this.#marqueeEl;
+    if (!el) return;
+    const box = dragBox(ax, ay, bx, by);
+    const crossing = dragDirection(ax, bx) === "crossing";
+    el.hidden = false;
+    el.className = crossing ? "crossing" : "window";
+    el.style.left = `${box.minX}px`;
+    el.style.top = `${box.minY}px`;
+    el.style.width = `${box.maxX - box.minX}px`;
+    el.style.height = `${box.maxY - box.minY}px`;
+  }
+
+  #hideMarquee(): void {
+    if (this.#marqueeEl) this.#marqueeEl.hidden = true;
+  }
+
   #onPointerMove = (e: PointerEvent): void => {
-    if (e.buttons !== 0) return;
+    if (e.buttons !== 0) {
+      const down = this.#downAt;
+      // Only a select-tool drag is a marquee; anything else is orbiting.
+      if (down && this.tool === "select" && !this.gizmo.dragging && e.buttons === 1) {
+        this.#showMarquee(down.x, down.y, e.clientX, e.clientY);
+      }
+      return;
+    }
     const hit = this.pick(e.clientX, e.clientY);
     const point = hit && hit.kind === "ground" ? hit.point : hit && hit.kind === "solid" ? hit.point : null;
     this.#events.onHover(point);

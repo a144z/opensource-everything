@@ -402,13 +402,17 @@ export function deleteSolids(ids: readonly SolidId[]): Command {
 }
 
 export function renameSolid(id: SolidId, name: string): Command {
+  // A blank name would leave the outliner with unclickable rows; refuse it here
+  // so no caller can produce one, rather than trusting every UI to check first.
+  const trimmed = name.trim();
+  if (trimmed === "") throw new RangeError("a solid's name cannot be blank");
   return {
     kind: "renameSolid",
-    label: `Rename to ${name}`,
+    label: `Rename to ${trimmed}`,
     apply(doc) {
       const prev = requireSolid(doc, id);
-      const next: Solid = { ...prev, revision: prev.revision + 1, meta: { ...prev.meta, name } };
-      return patchOf(doc, new Map([[id, next]]), new Map([[id, prev]]), `Rename to ${name}`);
+      const next: Solid = { ...prev, revision: prev.revision + 1, meta: { ...prev.meta, name: trimmed } };
+      return patchOf(doc, new Map([[id, next]]), new Map([[id, prev]]), `Rename to ${trimmed}`);
     },
   };
 }

@@ -15,12 +15,15 @@ import {
   dimensionLength,
   duplicateSolid,
   fitToEnvelope,
+  renameSolid,
   serializeJson,
+  setColor,
   setEnvelope,
   setMatrix,
   setMeta,
   type CommandId,
   type FitResult,
+  type Solid,
   type SolidId,
 } from "@apexus/engine";
 import { initKernel, kernelReady } from "@apexus/kernel";
@@ -58,6 +61,15 @@ const view = new View(viewport, session, {
     renderPanel();
   },
   onHover: (point) => tools.hover(point, cursor.x, cursor.y),
+  onMarquee: (ids, additive) => {
+    // Window/crossing drags *replace* the selection; Shift adds to it. A drag
+    // selects a set at once, so it must never toggle like a Shift-click does.
+    const next = new Set(additive ? [...selection, ...ids] : ids);
+    selection = next;
+    view.attachGizmo(next.size === 1 ? [...next][0]! : null);
+    renderPanel();
+    hint.textContent = ids.length === 0 ? "Drag selected nothing." : `Selected ${next.size} object(s).`;
+  },
   onGizmoCommit: (id, matrix) => {
     try {
       session.execute(setMatrix([id], matrix));
@@ -199,43 +211,108 @@ function setSelection(ids: readonly SolidId[], additive = false): void {
   renderPanel();
 }
 
+/**
+ * One outliner row. Everything here is a command, so every row action is one
+ * undo step and shows up in the palette and the history alike.
+ */
+function outlinerRow(solid: Solid): HTMLLIElement {
+  const li = document.createElement("li");
+  li.className = selection.has(solid.id) ? "selected" : "";
+  if (solid.meta.hidden) li.classList.add("hidden");
+  if (solid.meta.locked) li.classList.add("locked");
+  li.dataset["id"] = solid.id;
+
+  const swatch = document.createElement("input");
+  swatch.type = "color";
+  swatch.className = "swatch";
+  swatch.value = solid.meta.color;
+  swatch.title = "Colour";
+  swatch.addEventListener("click", (e) => e.stopPropagation());
+  swatch.addEventListener("change", () =>
+    quietly(() => session.execute(setColor([solid.id], swatch.value)), "Colour changed."),
+  );
+
+  const label = document.createElement("span");
+  label.className = "name";
+  label.textContent = `${solid.meta.name} - ${(session.analyse(solid.id).volume / 1000).toFixed(1)} cm3`;
+  label.title = "Double-click to rename";
+  label.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    beginRename(li, solid);
+  });
+
+  const eye = iconButton(solid.meta.hidden ? "Shown" : "Hide", solid.meta.hidden ? "+" : "-", () => {
+    quietly(() => session.execute(setMeta(solid.id, { hidden: !solid.meta.hidden }, solid.meta.hidden ? "Show" : "Hide")));
+  });
+  const lock = iconButton(solid.meta.locked ? "Unlock" : "Lock", solid.meta.locked ? "L" : "u", () => {
+    quietly(() =>
+      session.execute(setMeta(solid.id, { locked: !solid.meta.locked }, solid.meta.locked ? "Unlock" : "Lock")),
+    );
+  });
+
+  li.append(swatch, label, eye, lock);
+  li.addEventListener("click", () => setSelection([solid.id], true));
+  return li;
+}
+
+/** Run a mutation and report its failure in the hint line; never throws at the UI. */
+function quietly(action: () => void, done?: string): void {
+  try {
+    action();
+    if (done) hint.textContent = done;
+  } catch (err) {
+    hint.textContent = (err as Error).message;
+  }
+  refresh();
+}
+
+function iconButton(title: string, glyph: string, onClick: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.className = "icon";
+  b.title = title;
+  b.textContent = glyph;
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return b;
+}
+
+/** Swap the name span for an input; Enter commits, Escape and blur cancel. */
+function beginRename(row: HTMLLIElement, solid: Solid): void {
+  const name = row.querySelector<HTMLSpanElement>(".name");
+  if (!name) return;
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = solid.meta.name;
+  input.maxLength = 80;
+  let finished = false;
+  const finish = (commit: boolean): void => {
+    if (finished) return;
+    finished = true;
+    const next = input.value.trim();
+    if (commit && next && next !== solid.meta.name) {
+      quietly(() => session.execute(renameSolid(solid.id, next)), `Renamed to "${next}".`);
+    } else {
+      refresh(); // put the row back as it was
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // tool shortcuts must not fire while typing a name
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  name.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
 function renderPanel(): void {
   const doc = session.document;
   const outliner = $("outliner");
   outliner.innerHTML = "";
-  for (const solid of doc.solids.values()) {
-    const li = document.createElement("li");
-    li.className = selection.has(solid.id) ? "selected" : "";
-    const swatch = document.createElement("span");
-    swatch.className = "swatch";
-    swatch.style.background = solid.meta.color;
-    const label = document.createElement("span");
-    label.textContent = `${solid.meta.name} - ${(session.analyse(solid.id).volume / 1000).toFixed(1)} cm3`;
-    const eye = document.createElement("button");
-    eye.textContent = solid.meta.hidden ? "-" : "o";
-    eye.title = solid.meta.hidden ? "Show" : "Hide";
-    eye.addEventListener("click", (e) => {
-      e.stopPropagation();
-      try {
-        session.execute(setMeta(solid.id, { hidden: !solid.meta.hidden }, solid.meta.hidden ? "Show" : "Hide"));
-      } catch (err) {
-        hint.textContent = (err as Error).message;
-      }
-      refresh();
-    });
-    li.append(swatch, label, eye);
-    li.addEventListener("click", (e) => {
-      if (e.shiftKey) {
-        const next = new Set(selection);
-        if (next.has(solid.id)) next.delete(solid.id);
-        else next.add(solid.id);
-        setSelection([...next]);
-      } else {
-        setSelection([solid.id]);
-      }
-    });
-    outliner.append(li);
-  }
+  for (const solid of doc.solids.values()) outliner.append(outlinerRow(solid));
 
   const fit = session.fit();
   renderFit(fit);

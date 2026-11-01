@@ -207,10 +207,58 @@ button.active {
 }
 
 .swatch {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 2px;
   flex: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+}
+
+#outliner li .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#outliner li.hidden .name {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+#outliner li.locked .name::after {
+  content: " locked";
+  color: var(--dim);
+  font-size: 10px;
+}
+
+#outliner li .icon {
+  flex: none;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+#outliner li .icon:hover {
+  color: var(--accent);
+}
+
+#outliner input.rename {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 1px 4px;
 }
 
 .io {
@@ -223,6 +271,7 @@ button.active {
 #viewport {
   position: relative;
   min-width: 0;
+  overflow: hidden;
 }
 
 #viewport canvas {
@@ -257,6 +306,31 @@ kbd {
   padding: 0 4px;
   font: inherit;
   font-size: 10px;
+}
+
+/* Live window/crossing rectangle. Blue right-to-left would be crossing; the
+   colour mirrors the figure the drag will produce. */
+#marquee {
+  position: absolute;
+  pointer-events: none;
+  border-width: 1px;
+  border-style: solid;
+  z-index: 5;
+}
+
+#marquee[hidden] {
+  display: none;
+}
+
+#marquee.window {
+  border-color: #5fb0e8;
+  background: #5fb0e822;
+}
+
+#marquee.crossing {
+  border-color: #7fd694;
+  border-style: dashed;
+  background: #7fd69422;
 }
 
 /* Command palette (Ctrl+K). Sits above the hint so it never fights for space. */
