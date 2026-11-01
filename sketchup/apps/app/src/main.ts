@@ -9,6 +9,7 @@ import {
   arrayCopy,
   booleanSolids,
   centreInEnvelope,
+  commandKeys,
   deleteSolids,
   deserializeJson,
   dimensionLength,
@@ -18,6 +19,7 @@ import {
   setEnvelope,
   setMatrix,
   setMeta,
+  type CommandId,
   type FitResult,
   type SolidId,
 } from "@apexus/engine";
@@ -25,6 +27,7 @@ import { initKernel, kernelReady } from "@apexus/kernel";
 import { View, type PickHit, type Tool } from "./view.js";
 import { ToolController } from "./tools.js";
 import { Snapper } from "./snap.js";
+import { CommandPalette } from "./palette.js";
 
 /**
  * Composition root: wires engine <-> kernel <-> view <-> tools <-> DOM.
@@ -365,10 +368,112 @@ function refresh(): void {
   renderPanel();
 }
 
+/**
+ * One command, one entry point. The toolbar, the keyboard and the palette all
+ * call this, so a command can never mean two things.
+ */
+function runCommand(id: CommandId): void {
+  try {
+    switch (id) {
+      case "select":
+        selectTool("select");
+        return;
+      case "rectangle":
+      case "circle":
+      case "arc":
+      case "line":
+      case "pushpull":
+      case "offset":
+      case "followme":
+      case "move":
+      case "rotate":
+      case "tape":
+      case "dimension":
+        selectTool(id);
+        return;
+      case "undo":
+        session.undo();
+        setSelection([]);
+        refresh();
+        return;
+      case "redo":
+        session.redo();
+        setSelection([]);
+        refresh();
+        return;
+      case "delete": {
+        const ids = [...selection];
+        if (ids.length === 0) return;
+        session.execute(deleteSolids(ids));
+        setSelection([]);
+        hint.textContent = `Deleted ${ids.length} object(s).`;
+        refresh();
+        return;
+      }
+      case "duplicate": {
+        const first = [...selection][0];
+        if (!first) {
+          hint.textContent = "Duplicate: select something first.";
+          return;
+        }
+        const patch = session.execute(duplicateSolid(first, [50, 50, 0]));
+        setSelection([...patch.forward.keys()]);
+        hint.textContent = "Duplicated (50/50/0 mm).";
+        refresh();
+        return;
+      }
+      case "array":
+        runArray();
+        return;
+      case "union":
+      case "subtract":
+      case "intersect": {
+        const [a, b] = [...selection];
+        if (!a || !b) {
+          hint.textContent = "Booleans need exactly two objects selected.";
+          return;
+        }
+        const op = id === "union" ? "union" : id === "subtract" ? "difference" : "intersection";
+        const patch = session.execute(booleanSolids(a, b, op));
+        const created = [...patch.forward.keys()].find((k) => !selection.has(k));
+        setSelection(created ? [created] : []);
+        refresh();
+        hint.textContent = `${op} done.`;
+        return;
+      }
+      case "fit":
+        session.execute(fitToEnvelope());
+        hint.textContent = "Scaled down to fit the envelope.";
+        refresh();
+        return;
+    }
+  } catch (err) {
+    hint.textContent = (err as Error).message;
+  }
+}
+
+/** Commands that need objects, and how many. Used by the palette to hide dead ends. */
+function commandEnabled(id: CommandId): boolean {
+  const count = selection.size;
+  switch (id) {
+    case "delete":
+    case "duplicate":
+      return count >= 1;
+    case "union":
+    case "subtract":
+    case "intersect":
+      return count === 2;
+    default:
+      return true;
+  }
+}
+
 function selectTool(tool: Tool): void {
   tools.setTool(tool);
   renderPanel();
 }
+
+const palette = new CommandPalette({ run: runCommand, enabled: commandEnabled });
 
 function setGizmo(mode: "translate" | "rotate" | "scale"): void {
   gizmoMode = mode;
@@ -431,27 +536,15 @@ $("env-centre").addEventListener("click", () => {
   refresh();
 });
 
-for (const [id, op] of [
+for (const [button, command] of [
   ["op-union", "union"],
-  ["op-subtract", "difference"],
-  ["op-intersect", "intersection"],
+  ["op-subtract", "subtract"],
+  ["op-intersect", "intersect"],
 ] as const) {
-  $(id).addEventListener("click", () => {
-    const [a, b] = [...selection];
-    if (!a || !b) return;
-    try {
-      const patch = session.execute(booleanSolids(a, b, op));
-      const created = [...patch.forward.keys()].find((k) => !selection.has(k));
-      setSelection(created ? [created] : []);
-      refresh();
-      hint.textContent = `${op} done.`;
-    } catch (err) {
-      hint.textContent = (err as Error).message;
-    }
-  });
+  $(button).addEventListener("click", () => runCommand(command));
 }
 
-$("sel-array").addEventListener("click", () => {
+function runArray(): void {
   const id = [...selection][0];
   if (!id) {
     hint.textContent = "Array: select one object first.";
@@ -469,14 +562,19 @@ $("sel-array").addEventListener("click", () => {
     return;
   }
   const offset: Vec3 = [axis === "x" ? step.mm : 0, axis === "y" ? step.mm : 0, axis === "z" ? step.mm : 0];
+  // One command, one undo step: an array is a single user intention.
+  session.execute(arrayCopy(id, count, offset));
+  hint.textContent = `Array: ${count} copies ${formatLength(step.mm, unit)} apart along ${axis.toUpperCase()}.`;
+  refresh();
+}
+
+$("sel-array").addEventListener("click", () => {
   try {
-    // One command, one undo step: an array is a single user intention.
-    session.execute(arrayCopy(id, count, offset));
-    hint.textContent = `Array: ${count} copies ${formatLength(step.mm, unit)} apart along ${axis.toUpperCase()}.`;
+    runArray();
   } catch (err) {
     hint.textContent = (err as Error).message;
+    refresh();
   }
-  refresh();
 });
 
 $("sel-duplicate").addEventListener("click", () => {
@@ -502,108 +600,66 @@ $("file-input").addEventListener("change", (e) => {
   (e.target as HTMLInputElement).value = "";
 });
 
-$("undo").addEventListener("click", () => {
-  session.undo();
-  setSelection([]);
-  refresh();
-});
-$("redo").addEventListener("click", () => {
-  session.redo();
-  setSelection([]);
-  refresh();
-});
+$("undo").addEventListener("click", () => runCommand("undo"));
+$("redo").addEventListener("click", () => runCommand("redo"));
 $("zoom").addEventListener("click", () => view.zoomExtents());
 
 window.addEventListener("keydown", (e) => {
   const target = e.target as HTMLElement | null;
   if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+
+  // The palette owns the keyboard while it is open.
+  if (palette.isOpen) return;
+
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key.toLowerCase() === "z") {
+  if (mod && e.key.toLowerCase() === "k") {
     e.preventDefault();
-    if (e.shiftKey) session.redo();
-    else session.undo();
-    setSelection([]);
-    refresh();
+    palette.open();
     return;
   }
-  if (mod && e.key.toLowerCase() === "y") {
-    e.preventDefault();
-    session.redo();
-    setSelection([]);
-    refresh();
-    return;
-  }
+
+  // Typing a length beats every shortcut, or "2" would change the tool.
   if (tools.typeKey(e.key)) {
     e.preventDefault();
     return;
   }
-  switch (e.key.toLowerCase()) {
-    case "r":
-      selectTool("rectangle");
-      break;
-    case "p":
-      selectTool("pushpull");
-      break;
-    case "l":
-      selectTool("line");
-      break;
-    case "m":
-      selectTool("tape");
-      break;
-    case "d":
-      selectTool("dimension");
-      break;
-    case "f":
-      selectTool("followme");
-      break;
-    case "o":
-      if (!mod) selectTool("offset");
-      break;
-    case "q":
-      selectTool("move");
-      break;
-    case "i":
-      selectTool("rotate");
-      break;
-    case "c":
-      if (!mod) selectTool("circle");
-      break;
-    case "a":
-      if (!mod) selectTool("arc");
-      break;
-    case "g":
-      setGizmo("translate");
-      break;
-    case "t":
-      setGizmo("rotate");
-      break;
-    case "s":
-      setGizmo("scale");
-      break;
-    case " ":
-      e.preventDefault();
-      selectTool("select");
-      break;
-    case "escape":
+
+  const typed = shortcutFor(e);
+  if (typed) {
+    e.preventDefault();
+    runCommand(typed);
+    return;
+  }
+
+  switch (e.key) {
+    case "Escape":
       tools.cancel();
       setSelection([]);
       break;
-    case "delete":
-    case "backspace": {
-      const ids = [...selection];
-      if (ids.length === 0) break;
-      e.preventDefault();
-      try {
-        session.execute(deleteSolids(ids));
-      } catch (err) {
-        hint.textContent = (err as Error).message;
-      }
-      setSelection([]);
-      refresh();
+    case "Delete":
+    case "Backspace":
+      runCommand("delete");
       break;
-    }
   }
 });
+
+/** The command a key event maps to, from the generated shortcut table. */
+function shortcutFor(e: KeyboardEvent): CommandId | null {
+  const key = e.key === " " ? " " : e.key;
+  const mod = e.ctrlKey || e.metaKey;
+  const wanted = [
+    mod ? `Ctrl+${e.shiftKey ? "Shift+" : ""}${key.toUpperCase()}` : null,
+    mod ? `Ctrl+${key.toUpperCase()}` : null,
+    !mod && !e.altKey ? key.toLowerCase() : null,
+  ].filter((k): k is string => k !== null);
+
+  for (const candidate of wanted) {
+    for (const [id, shortcut] of Object.entries(commandKeys)) {
+      if (shortcut.toLowerCase() === candidate.toLowerCase()) return id as CommandId;
+    }
+  }
+  return null;
+}
 
 view.renderer.domElement.addEventListener("pointermove", (e) => {
   cursor.x = e.clientX;

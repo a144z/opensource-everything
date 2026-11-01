@@ -8,6 +8,7 @@ export * from "./command.js";
 export * from "./commands.js";
 export * from "./commands.gen.js";
 export * from "./fit.js";
+export * from "./fuzzy.js";
 export * from "./history.js";
 export * from "./io.js";
 export * from "./resolve.js";

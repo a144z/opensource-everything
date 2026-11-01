@@ -11,7 +11,7 @@
       <aside id="panel">
         <header>
           <h1>FitCheck</h1>
-          <span class="ver">L1</span>
+          <span class="ver">L2</span>
         </header>
 
         <section class="tools">
@@ -92,12 +92,17 @@
 
         <footer>
           <kbd>R</kbd> rect <kbd>P</kbd> pull <kbd>L</kbd> line <kbd>M</kbd> tape <kbd>F</kbd> follow
-          <kbd>O</kbd> offset <kbd>Shift</kbd> axis lock
-          <kbd>G</kbd>/<kbd>T</kbd>/<kbd>S</kbd> move/rotate/scale <kbd>Del</kbd> delete <kbd>Ctrl+Z</kbd>
+          <kbd>O</kbd> offset <kbd>Q</kbd> move <kbd>I</kbd> rotate <kbd>C</kbd> circle <kbd>A</kbd> arc
+          <kbd>D</kbd> dim <kbd>Shift</kbd> axis lock <kbd>G</kbd>/<kbd>T</kbd>/<kbd>S</kbd> gizmo
+          <kbd>Del</kbd> delete <kbd>Ctrl+Z</kbd> undo <kbd>Ctrl+K</kbd> commands
         </footer>
       </aside>
       <main id="viewport"></main>
       <div id="hint"></div>
+      <div id="palette" hidden>
+        <input id="palette-input" type="text" placeholder="Type a command" autocomplete="off" spellcheck="false" />
+        <ul id="palette-list" role="listbox"></ul>
+      </div>
       <input id="file-input" type="file" accept=".fcproj,application/json" hidden />
     </div>
     <script type="module" src="/src/main.ts"></script>
