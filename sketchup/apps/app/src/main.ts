@@ -15,9 +15,12 @@ import {
   commandForEvent,
   commandKeys,
   commandLabels,
+  componentsOf,
+  definitionName,
   deleteSolids,
   descendantsOf,
   deserializeJson,
+  detachDefinition,
   dimensionLength,
   drawnSolids,
   duplicateSolid,
@@ -27,11 +30,14 @@ import {
   instanceCopy,
   isCommand,
   isHiddenByAncestor,
+  makeComponent,
   parseOverrides,
+  renameDefinition,
   renameSolid,
   rootsOf,
   serialiseOverrides,
   serializeJson,
+  selectByLasso,
   setColor,
   setEnvelope,
   setFinish,
@@ -441,26 +447,44 @@ function outlinerRow(solid: Solid, depth = 0): HTMLLIElement {
   // only (`collapsed`), deliberately not a command: a folded group is not an
   // editable fact and must not land in the undo stack or the project file.
   const members = solid.recipe.kind === "group" ? solid.recipe.members : [];
+  const definition = solid.recipe.kind === "instance" ? solid.recipe.definition : undefined;
+  const siblings = definition
+    ? componentsOf(session.document).find((c) => c.definition === definition)
+    : undefined;
   const folded = collapsed.has(solid.id);
   const chip = document.createElement("button");
   chip.className = "chip";
-  chip.title = members.length > 0 ? (folded ? "Expand group" : "Collapse group") : "Group";
-  chip.textContent = members.length === 0 ? "G" : folded ? "\u25b8" : "\u25be";
-  chip.disabled = members.length === 0;
-  chip.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (folded) collapsed.delete(solid.id);
-    else collapsed.add(solid.id);
-    renderPanel();
-  });
+  if (definition) {
+    // An instance's chip is not a fold arrow: it says how many of this
+    // component exist, which is the thing that makes it a component.
+    chip.textContent = `\u29c9${siblings?.count ?? 1}`;
+    chip.title = `Component "${definition}", ${siblings?.count ?? 1} in the model. Click to select them all.`;
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setSelection([...(siblings?.instances ?? [])]);
+    });
+  } else {
+    chip.title = members.length > 0 ? (folded ? "Expand group" : "Collapse group") : "Group";
+    chip.textContent = members.length === 0 ? "G" : folded ? "\u25b8" : "\u25be";
+    chip.disabled = members.length === 0;
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (folded) collapsed.delete(solid.id);
+      else collapsed.add(solid.id);
+      renderPanel();
+    });
+  }
 
   const label = document.createElement("span");
   label.className = "name";
   label.textContent = `${solid.meta.name} - ${(session.analyse(solid.id).volume / 1000).toFixed(1)} cm3`;
-  label.title = "Double-click to rename";
+  label.title = definition
+    ? `Component "${definition}". Double-click to rename every instance.`
+    : "Double-click to rename";
   label.addEventListener("dblclick", (e) => {
     e.stopPropagation();
-    beginRename(li, solid);
+    if (definition) beginRenameDefinition(li, definition);
+    else beginRename(li, solid);
   });
 
   const eye = iconButton(solid.meta.hidden ? "Shown" : "Hide", solid.meta.hidden ? "+" : "-", () => {
@@ -568,6 +592,50 @@ function beginRename(row: HTMLLIElement, solid: Solid): void {
   input.select();
 }
 
+/**
+ * Rename a component definition from its row: one edit, every instance.
+ *
+ * Deliberately the same gesture as renaming a solid, because the user's mental
+ * model is "rename this window". The difference is what it affects, and the hint
+ * line says so afterwards, since a rename that quietly changed five other rows is
+ * the one outcome nobody would guess.
+ */
+function beginRenameDefinition(row: HTMLLIElement, definition: string): void {
+  const name = row.querySelector<HTMLSpanElement>(".name");
+  if (!name) return;
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = definition;
+  input.maxLength = 64;
+  let finished = false;
+  const finish = (commit: boolean): void => {
+    if (finished) return;
+    finished = true;
+    const next = input.value.trim();
+    if (commit && next && next !== definition) {
+      try {
+        const patch = session.execute(renameDefinition(definition, next));
+        hint.textContent = `Renamed component "${definition}" to "${next}" (${patch.forward.size} instance(s)).`;
+        refresh();
+      } catch (err) {
+        hint.textContent = (err as Error).message;
+        refresh();
+      }
+    } else {
+      refresh();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  name.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
 function renderPanel(): void {
   const doc = session.document;
   // The command list is published on the panel so a headless check can prove the
@@ -612,10 +680,13 @@ function renderPanel(): void {
   ($("style-edges") as HTMLButtonElement).classList.toggle("active", view.style === "edges");
   ($("toggle-shadows") as HTMLButtonElement).classList.toggle("active", view.shadows);
   ($("toggle-axes") as HTMLButtonElement).classList.toggle("active", view.axesVisible);
+  ($("toggle-xray") as HTMLButtonElement).classList.toggle("active", view.xray);
   const enabled = selection.size >= 1;
   ($("sel-array") as HTMLButtonElement).disabled = !enabled;
   ($("sel-duplicate") as HTMLButtonElement).disabled = !enabled;
   ($("sel-instance") as HTMLButtonElement).disabled = !enabled;
+  ($("sel-component") as HTMLButtonElement).disabled = !enabled;
+  ($("sel-detach") as HTMLButtonElement).disabled = !commandEnabled("detachComponent");
   ($("sel-group") as HTMLButtonElement).disabled = !enabled;
   ($("sel-ungroup") as HTMLButtonElement).disabled = !commandEnabled("ungroup");
   ($("sel-explode") as HTMLButtonElement).disabled = !commandEnabled("explode");
@@ -812,6 +883,7 @@ function runCommand(id: CommandId): void {
         return;
       case "rectangle":
       case "circle":
+      case "polygon":
       case "arc":
       case "line":
       case "pushpull":
@@ -867,6 +939,39 @@ function runCommand(id: CommandId): void {
         const patch = session.execute(instanceCopy(first, [200, 0, 0]));
         setSelection([...patch.forward.keys()]);
         hint.textContent = "Instance made (200 mm to the right); edit the source and this follows.";
+        refresh();
+        return;
+      }
+      case "makeComponent": {
+        const first = [...selection][0];
+        if (!first) {
+          hint.textContent = "Make Component: select something first.";
+          return;
+        }
+        const solid = session.document.solids.get(first);
+        const patch = session.execute(
+          makeComponent(first, [200, 0, 0], solid ? definitionName(solid) : undefined),
+        );
+        // Select the new instance, not the definition: the next thing a user
+        // does with a fresh component is place more of them, or move this one.
+        const placed = [...patch.backward].filter(([, prev]) => prev === null).map(([id]) => id);
+        setSelection(placed);
+        hint.textContent = `Component "${definitionName(session.document.solids.get(first)!)}" made; double-click a row to rename every instance.`;
+        refresh();
+        return;
+      }
+      case "detachComponent": {
+        const defs = new Set<string>();
+        for (const id of selection) {
+          const solid = session.document.solids.get(id);
+          if (solid?.recipe.kind === "instance" && solid.recipe.definition) defs.add(solid.recipe.definition);
+        }
+        if (defs.size === 0) {
+          hint.textContent = "Detach Component: select a component instance first.";
+          return;
+        }
+        session.batch([...defs].map((d) => detachDefinition(d)));
+        hint.textContent = `Detached ${defs.size} component(s); the objects stay, only the link goes.`;
         refresh();
         return;
       }
@@ -977,6 +1082,11 @@ function runCommand(id: CommandId): void {
       case "toggleShadows":
         setShadows(!view.shadows);
         return;
+      case "toggleXray":
+        view.setXray(!view.xray);
+        hint.textContent = view.xray ? "X-ray on: faces are see-through." : "X-ray off.";
+        renderPanel();
+        return;
       case "toggleAxes":
         setAxes(!view.axesVisible);
         return;
@@ -993,7 +1103,13 @@ function commandEnabled(id: CommandId): boolean {
     case "delete":
     case "duplicate":
     case "instance":
+    case "makeComponent":
       return count >= 1;
+    case "detachComponent":
+      return [...selection].some((id) => {
+        const r = session.document.solids.get(id)?.recipe;
+        return r?.kind === "instance" && Boolean(r.definition);
+      });
     case "scale":
       // Scaling needs a pivot, so it needs something selected to be useful.
       return count >= 1;
@@ -1124,6 +1240,7 @@ $("style-hidden").addEventListener("click", () => runCommand("viewHiddenLine"));
 $("style-edges").addEventListener("click", () => runCommand("viewEdges"));
 $("toggle-shadows").addEventListener("click", () => runCommand("toggleShadows"));
 $("toggle-axes").addEventListener("click", () => runCommand("toggleAxes"));
+$("toggle-xray").addEventListener("click", () => runCommand("toggleXray"));
 
 $("env-set").addEventListener("click", setEnvelopeFromInputs);
 $("env-clear").addEventListener("click", () => {
@@ -1173,6 +1290,8 @@ function applyFinish(): void {
 $("roughness").addEventListener("change", applyFinish);
 $("metallic").addEventListener("change", applyFinish);
 $("sel-instance").addEventListener("click", () => runCommand("instance"));
+$("sel-component").addEventListener("click", () => runCommand("makeComponent"));
+$("sel-detach").addEventListener("click", () => runCommand("detachComponent"));
 $("sel-group").addEventListener("click", () => runCommand("group"));
 $("sel-ungroup").addEventListener("click", () => runCommand("ungroup"));
 $("sel-explode").addEventListener("click", () => runCommand("explode"));
@@ -1443,6 +1562,14 @@ interface FitCheckHarness {
   pressKey(key: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }): void;
   /** What shortcut a given key would now run, if any. */
   commandForKey(key: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }): string | null;
+  /** Component definitions and how many instances each has. */
+  components(): { definition: string; count: number; instances: string[] }[];
+  /** The definition a solid belongs to, if any. */
+  definitionOf(id: string): string | null;
+  /** X-ray state, so a toggle can be proven to reach the renderer. */
+  xray(): boolean;
+  /** What a given lasso path would select, through the engine's own rule. */
+  lassoSelect(path: { x: number; y: number }[]): string[];
 }
 
 declare global {
@@ -1569,6 +1696,24 @@ window.fitcheck = {
       metaKey: false,
     };
     return commandForEvent(keys, bindable);
+  },
+  components: () =>
+    componentsOf(session.document).map((c) => ({ definition: c.definition, count: c.count, instances: [...c.instances] })),
+  definitionOf(id) {
+    const solid = session.document.solids.get(id as SolidId);
+    if (!solid || solid.recipe.kind !== "instance") return null;
+    return solid.recipe.definition ?? null;
+  },
+  xray: () => view.xray,
+  lassoSelect(path) {
+    // The engine rule, over the same screen boxes the viewport uses; this proves
+    // the selection logic without a synthetic pointer drag.
+    const ids = view.selectableIds();
+    return selectByLasso(
+      ids,
+      path.map((p) => [p.x, p.y] as const),
+      (id) => view.screenBox(id as SolidId),
+    );
   },
 };
 

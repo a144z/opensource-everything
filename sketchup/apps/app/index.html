@@ -26,6 +26,7 @@
           <button data-tool="move" title="Move (Q), hold Ctrl to copy">Move</button>
           <button data-tool="rotate" title="Rotate about Z (I)">Rotate</button>
           <button data-tool="circle" title="Circle (C)">Circle</button>
+          <button data-tool="polygon" title="Polygon (Alt+G); type the number of sides">Polygon</button>
           <button data-tool="arc" title="Arc, three-point (A)">Arc</button>
           <button data-tool="rotatedRectangle" title="Rotated Rectangle (Alt+R)">Rot. Rect</button>
           <button data-tool="scale" title="Scale about a point (S)">Scale</button>
@@ -74,6 +75,7 @@
           <div class="row">
             <button id="toggle-shadows" class="active" title="Cast and receive sun shadows">Shadows</button>
             <button id="toggle-axes" class="active" title="Show the red, green and blue world axes">Axes</button>
+            <button id="toggle-xray" title="See through every face, keeping the current style (Alt+X)">X-ray</button>
           </div>
         </section>
 
@@ -108,6 +110,10 @@
           <div class="row">
             <button id="sel-duplicate" title="Copy the selected object">Duplicate</button>
             <button id="sel-instance" title="A copy that follows every later edit to the source">Instance</button>
+          </div>
+          <div class="row">
+            <button id="sel-component" title="A named, reusable component: rename one, rename them all (Shift+C)">Component</button>
+            <button id="sel-detach" title="Stop these copies following the component name; the geometry stays">Detach</button>
           </div>
           <div class="row">
             <button id="sel-group" title="Treat the selection as one object (Ctrl+G)">Group</button>
@@ -173,7 +179,7 @@
 
         <footer>
           <kbd>R</kbd> rect <kbd>P</kbd> pull <kbd>L</kbd> line <kbd>M</kbd> tape <kbd>F</kbd> follow
-          <kbd>O</kbd> offset <kbd>Q</kbd> move <kbd>I</kbd> rotate <kbd>C</kbd> circle <kbd>A</kbd> arc
+          <kbd>O</kbd> offset <kbd>Q</kbd> move <kbd>I</kbd> rotate <kbd>C</kbd> circle <kbd>Alt+G</kbd> polygon <kbd>A</kbd> arc
           <kbd>D</kbd> dim <kbd>Shift</kbd> axis lock <kbd>G</kbd>/<kbd>T</kbd>/<kbd>S</kbd> gizmo
           <kbd>Del</kbd> delete <kbd>Ctrl+Z</kbd> undo <kbd>Ctrl+K</kbd> commands
         </footer>

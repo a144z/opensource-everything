@@ -6,6 +6,7 @@ import {
   counterClockwise,
   formatLength,
   parseLength,
+  polygonPoints,
   polylineLength,
   type Vec2,
   type Vec3,
@@ -17,12 +18,14 @@ import {
   duplicateSolid,
   guessAxis,
   makeAnnotation,
+  planeBasis,
   pullFace as pullFaceCmd,
   rotateSolids,
   scaleAbout,
   scaleSolids,
   translateSolids,
   type Annotation,
+  type Axis,
   type Session,
   type SolidId,
   type SolidRecipe,
@@ -73,6 +76,16 @@ type Pending =
       current: Vec3;
     }
   | {
+      /**
+       * Polygon: centre, then a point on the circumscribed circle. `sides` is
+       * chosen by typing a number before or during the gesture, as in SketchUp.
+       */
+      readonly kind: "polygon";
+      readonly centre: Vec3;
+      readonly sides: number;
+      current: Vec3;
+    }
+  | {
       /** Arc: three points on the ground - start, a point on the arc, the end. */
       readonly kind: "arc";
       readonly points: Vec3[];
@@ -107,10 +120,11 @@ type Pending =
       current: Vec3;
     }
   | {
-      /** Rotate: a pivot on the ground plane, then a reference direction. */
+      /** Rotate: a pivot, then a reference direction, about one world axis. */
       readonly kind: "rotate";
       readonly pivot: Vec3;
       readonly from: Vec3;
+      readonly axis: Axis;
       current: Vec3;
     }
   | {
@@ -156,6 +170,27 @@ export class ToolController {
   #ghost: THREE.Line;
   #typed = "";
   #lastPullId: SolidId | null = null;
+  /** The axis the Rotate tool turns about; arrow keys change it. */
+  #rotateAxis: Axis = "z";
+  /** Side count for the next polygon; typed digits change it. */
+  #polygonSides = 6;
+
+  /** Show the side count as it is typed, and adopt it live where it is valid. */
+  #applyPolygonSides(): void {
+    const n = Number.parseInt(this.#typed, 10);
+    if (Number.isFinite(n) && n >= 3 && n <= 96) this.#polygonSides = n;
+    const p = this.#pending;
+    if (p?.kind === "polygon") {
+      // Mutating the pending shape is what SketchUp does: the polygon under the
+      // cursor gains a side as you type, so the result is never a surprise.
+      (p as { sides: number }).sides = this.#polygonSides;
+    }
+    this.#host.setHint(
+      Number.isFinite(n)
+        ? `Polygon sides: ${this.#polygonSides}${n < 3 ? " (at least 3)" : n > 96 ? " (at most 96)" : ""}`
+        : `Polygon sides: ${this.#typed}`,
+    );
+  }
 
   constructor(host: ToolHost) {
     this.#host = host;
@@ -175,6 +210,9 @@ export class ToolController {
   setTool(tool: Tool): void {
     this.#cancel();
     this.#tool = tool;
+    // A new gesture starts about the blue axis again; carrying the last axis
+    // over would make Rotate surprise the user long after they chose it.
+    if (tool === "rotate") this.#rotateAxis = "z";
     this.#host.view.setTool(tool);
     this.#host.setHint(HINTS[tool]);
   }
@@ -185,6 +223,49 @@ export class ToolController {
 
   /** Typed digits while a tool is active (numeric entry, task L1-12). */
   typeKey(key: string): boolean {
+    // Polygon's number is a side count, not a length: "6" must not be read as
+    // six millimetres of radius.
+    if (this.#tool === "polygon") {
+      if (/^[0-9]$/.test(key)) {
+        this.#typed += key;
+        this.#applyPolygonSides();
+        return true;
+      }
+      if (key === "Backspace" && this.#typed) {
+        this.#typed = this.#typed.slice(0, -1);
+        this.#applyPolygonSides();
+        return true;
+      }
+      if (key === "Enter" && this.#typed) {
+        this.#polygonSides = clampSides(this.#typed);
+        this.#typed = "";
+        this.#host.setHint(`Polygon will have ${this.#polygonSides} sides.`);
+        return true;
+      }
+      if (key === "Escape" && this.#typed) {
+        this.#typed = "";
+        this.#host.setHint("Typed side count cleared.");
+        return true;
+      }
+    }
+    // Arrow keys choose the rotate axis, before and during the gesture. This is
+    // SketchUp's own control, and it is what makes an X or Y turn reachable at
+    // all: without it, a door hinged on its side can never be swung open.
+    if (this.#tool === "rotate") {
+      const axis = key === "ArrowLeft" || key === "ArrowRight" ? "y" : key === "ArrowUp" || key === "ArrowDown" ? "x" : null;
+      if (axis) {
+        this.#rotateAxis = axis;
+        const p = this.#pending;
+        if (p?.kind === "rotate") {
+          // Re-seat the reference direction in the new plane so the first angle
+          // read is 0 rather than a leftover from the other axis.
+          const basis = planeBasis(axis);
+          p.current = [p.pivot[0] + basis.u[0] * 100, p.pivot[1] + basis.u[1] * 100, p.pivot[2] + basis.u[2] * 100];
+        }
+        this.#host.setHint(`Rotate about ${axisName(axis)}. Arrow keys change the axis.`);
+        return true;
+      }
+    }
     // Move and Rotate accept a typed offset without any half-finished gesture:
     // select, press M, type "500,0". SketchUp's precision input is a property of
     // the tool, not of how far the user has got with the mouse, and without it a
@@ -271,8 +352,9 @@ export class ToolController {
           return;
         }
         const pivot = this.#pivotForSelection(ids);
-        this.#host.session.batch(ids.map((id) => rotateSolids([id], "z", deg, pivot)));
-        this.#host.setHint(`Rotated ${ids.length} object(s) ${deg}\u00b0 about Z.`);
+        const axis = this.#rotateAxis;
+        this.#host.session.batch(ids.map((id) => rotateSolids([id], axis, deg, pivot)));
+        this.#host.setHint(`Rotated ${ids.length} object(s) ${deg}\u00b0 about ${axisName(axis)}.`);
         return;
       }
       const delta = deltaFromText(text, this.#host.unit());
@@ -436,6 +518,15 @@ export class ToolController {
       this.#host.setHint(
         `Circle radius ${fmt(distance(p.centre, p.current))} mm  ${this.#glyphHint()} click to place, Esc cancels`,
       );
+    } else if (p?.kind === "polygon") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.centre, GLOSSARY_UP);
+      if (!pt) return;
+      p.current = this.#snap(pt).point;
+      const radius = distance(p.centre, p.current);
+      this.#drawPolygon(p.centre, p.current, radius, p.sides);
+      this.#host.setHint(
+        `Polygon ${p.sides} sides, radius ${fmt(radius)} mm  ${this.#glyphHint()} click to place, Esc cancels`,
+      );
     } else if (p?.kind === "arc") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.points[0]!, GLOSSARY_UP);
       if (!pt) return;
@@ -552,6 +643,9 @@ export class ToolController {
       case "circle":
         this.#clickCircle(hit, clientX, clientY);
         return;
+      case "polygon":
+        this.#clickPolygon(hit, clientX, clientY);
+        return;
       case "arc":
         this.#clickArc(hit, clientX, clientY);
         return;
@@ -560,7 +654,6 @@ export class ToolController {
         return;
     }
   }
-
   /** Live feedback while dragging a face (button held) or tracking the mouse. */
   drag(clientX: number, clientY: number): void {
     const p = this.#pending;
@@ -624,6 +717,28 @@ export class ToolController {
   }
 
   /**
+   * Polygon: centre, then a point on the circumscribed circle. The side count
+   * comes from typing a number (3-96), which is how SketchUp asks for it, and
+   * the shape is drawn with one vertex on the reference direction.
+   */
+  #clickPolygon(hit: PickHit, clientX: number, clientY: number): void {
+    const p = this.#pending;
+    if (p?.kind === "polygon") {
+      this.#cancel();
+      const radius = distance(p.centre, p.current);
+      if (radius < 0.5) return;
+      const ring = polygonPoints(p.centre, p.current, radius, p.sides);
+      this.#addLoop(ring, 10, `Polygon ${p.sides}s r${fmt(radius)}`);
+      return;
+    }
+    const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    const sides = this.#polygonSides;
+    this.#pending = { kind: "polygon", centre: at, sides, current: [at[0] + 1, at[1], at[2]] };
+    this.#host.setHint(`Polygon (${sides} sides): move to set the radius, type a number to change sides, click to place`);
+  }
+
+  /**
    * Arc is the SketchUp two-step: start point, then a point the arc passes
    * through, then the end. Three clicks, one solid, one undo step.
    */
@@ -671,6 +786,10 @@ export class ToolController {
   #drawCircle(centre: Vec3, radius: number): void {
     const ring = circlePoints(centre, [centre[0] + radius, centre[1], centre[2]], radius, 48);
     this.#setPreview(this.#ring3(ring));
+  }
+
+  #drawPolygon(centre: Vec3, towards: Vec3, radius: number, sides: number): void {
+    this.#setPreview(this.#ring3(polygonPoints(centre, towards, radius, sides)));
   }
 
   /** Ring as a THREE polyline with the first point repeated to close it. */
@@ -1010,7 +1129,14 @@ export class ToolController {
     );
   }
 
-  /** Rotate: click the pivot, then the reference direction, then the angle. */
+  /**
+   * Rotate: click the pivot, then the reference direction, then the angle.
+   *
+   * The turn is about `this.#rotateAxis`: Z on the ground, X or Y when the user
+   * holds the corresponding arrow key (or when a gizmo axis was chosen). A
+   * SketchUp rotate about the blue axis is only one of three, and a user who
+   * wants a door to swing on its hinge needs the other two.
+   */
   #clickRotate(hit: PickHit, clientX: number, clientY: number): void {
     const p = this.#pending;
     const ids = [...this.#host.selection()];
@@ -1022,7 +1148,8 @@ export class ToolController {
         return;
       }
       try {
-        this.#host.session.batch(ids.map((id) => rotateSolids([id], "z", degrees, p.pivot)));        this.#host.setHint(`Rotated ${ids.length} object(s) ${degrees.toFixed(1)} deg about Z.`);
+        this.#host.session.batch(ids.map((id) => rotateSolids([id], p.axis, degrees, p.pivot)));
+        this.#host.setHint(`Rotated ${ids.length} object(s) ${degrees.toFixed(1)} deg about ${axisName(p.axis)}.`);
       } catch (err) {
         this.#host.setHint((err as Error).message);
       }
@@ -1035,15 +1162,27 @@ export class ToolController {
     const at =
       hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
     if (!at) return;
-    this.#pending = { kind: "rotate", pivot: at, from: [at[0] + 100, at[1], at[2]], current: [at[0] + 100, at[1], at[2]] };
-    this.#host.setHint("Rotate: move to set the angle, click to apply, Esc cancels");
+    const axis = this.#rotateAxis;
+    const basis = planeBasis(axis);
+    // The reference direction is the first basis vector, so the first hint
+    // reads plainly ("0 deg") instead of starting part-way round.
+    const from: Vec3 = [at[0] + basis.u[0] * 100, at[1] + basis.u[1] * 100, at[2] + basis.u[2] * 100];
+    this.#pending = { kind: "rotate", pivot: at, from, current: from, axis };
+    this.#host.setHint(`Rotate about ${axisName(axis)}: move to set the angle, click to apply, Esc cancels`);
   }
 
-  /** Signed turn about Z, from the pivot through the start point to `to`. */
+  /** Signed turn about the pending axis, measured in that axis's plane. */
   #angle(p: Extract<Pending, { kind: "rotate" }>, to: Vec3): number {
-    const a = Math.atan2(p.from[1] - p.pivot[1], p.from[0] - p.pivot[0]);
-    const b = Math.atan2(to[1] - p.pivot[1], to[0] - p.pivot[0]);
-    let deg = ((b - a) * 180) / Math.PI;
+    const { u, v } = planeBasis(p.axis);
+    const project = (q: Vec3): [number, number] => {
+      const d: Vec3 = [q[0] - p.pivot[0], q[1] - p.pivot[1], q[2] - p.pivot[2]];
+      return [d[0] * u[0] + d[1] * u[1] + d[2] * u[2], d[0] * v[0] + d[1] * v[1] + d[2] * v[2]];
+    };
+    const [ax, ay] = project(p.from);
+    const [bx, by] = project(to);
+    // A point on the axis has no angle; report none rather than a random one.
+    if (Math.hypot(ax, ay) < 1e-9 || Math.hypot(bx, by) < 1e-9) return 0;
+    let deg = ((Math.atan2(by, bx) - Math.atan2(ay, ax)) * 180) / Math.PI;
     // Normalise to (-180, 180] so a small nudge never reads as 359.
     while (deg > 180) deg -= 360;
     while (deg <= -180) deg += 360;
@@ -1262,6 +1401,7 @@ const HINTS: Record<Tool, string> = {
   move: "Move: click a grab point, then where it goes",
   rotate: "Rotate: click the pivot, then drag to set the angle",
   circle: "Circle: click the centre, then move to set the radius",
+  polygon: "Polygon: click the centre, move to set the radius, type a number for the sides",
   arc: "Arc: click the start, a point on the arc, then the end",
   rotatedRectangle: "Rotated Rectangle: click a corner, the end of the base edge, then the depth",
   scale: "Scale: click the point that stays put, then drag outward to grow (type a factor)",
@@ -1326,6 +1466,18 @@ function distance(a: Vec3, b: Vec3): number {
 
 function distance2(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+/** The axis colour name SketchUp uses in its own prompts. */
+export function axisName(axis: Axis): "X" | "Y" | "Z" {
+  return axis === "x" ? "X" : axis === "y" ? "Y" : "Z";
+}
+
+/** A typed side count, clamped to the range a polygon can actually use. */
+export function clampSides(text: string): number {
+  const n = Number.parseInt(text, 10);
+  if (!Number.isFinite(n)) return 6;
+  return Math.min(96, Math.max(3, n));
 }
 
 /**

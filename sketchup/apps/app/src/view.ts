@@ -8,7 +8,10 @@ import {
   dragDirection,
   drawnSolids,
   isDegenerate,
+  isLassoPath,
+  lassoDirection,
   selectByDrag,
+  selectByLasso,
   type ScreenBox,
   type Session,
   type Solid,
@@ -23,6 +26,21 @@ import {
 
 const UP: Vec3 = [0, 0, 1];
 
+/** Points closer than this on screen are merged, so a still hand adds no noise. */
+const LASSO_STEP = 6;
+
+/**
+ * True when a drag with the Select tool traces a lasso rather than a rectangle.
+ *
+ * SketchUp puts lasso and rectangle on the same drag and lets the modifier
+ * decide, so a user who never learns the modifier never loses the behaviour they
+ * had. Right button is the only free one here: Ctrl and Shift are already copy
+ * and "add to selection" during a drag.
+ */
+export function isLassoDrag(button: number, tool: Tool): boolean {
+  return tool === "select" && button === 2;
+}
+
 export type Tool =
   | "select"
   | "rectangle"
@@ -35,6 +53,7 @@ export type Tool =
   | "move"
   | "rotate"
   | "circle"
+  | "polygon"
   | "arc"
   | "rotatedRectangle"
   | "scale"
@@ -93,9 +112,13 @@ export class View {
   #dirty = true;
   #resizeObserver: ResizeObserver;
   #downAt: { x: number; y: number } | null = null;
+  /** Screen points of an in-progress lasso; null when this drag is a rectangle. */
+  #lasso: { x: number; y: number }[] | null = null;
   #gizmoStart: { id: SolidId; matrix: number[] } | null = null;
   #shift = false;
   #style: "shaded" | "hiddenLine" | "edges" = "shaded";
+  /** X-ray lens over the current style; not a style of its own. */
+  #xray = false;
   #shadows = true;
   #axesVisible = true;
   /** Live drag rectangle; created lazily so the overlay sits over the canvas. */
@@ -188,6 +211,8 @@ export class View {
     this.gizmo.enabled = tool === "select";
     this.renderer.domElement.style.cursor = tool === "select" ? "default" : "crosshair";
     this.#hideMarquee();
+    this.#lasso = null;
+    this.controls.enabled = true;
     this.#dirty = true;
   }
 
@@ -347,6 +372,11 @@ export class View {
    * SketchUp's three drawing styles, which are the three ways people read a
    * model. Shaded is the default; hidden line and edges are line drawings, so
    * they drop colour and lighting rather than tinting the same shading.
+   *
+   * X-ray is not a fourth style. It is a lens laid over whichever style is
+   * current: the faces go translucent so hidden edges show through, which is
+   * how a user checks whether a wall actually meets a floor before trusting a
+   * camera angle. So the style and the x-ray flag are stored separately.
    */
   setStyle(style: "shaded" | "hiddenLine" | "edges"): void {
     this.#style = style;
@@ -354,6 +384,20 @@ export class View {
     this.grid.visible = style === "shaded";
     this.#dirty = true;
   }
+
+  /** Toggle the x-ray lens without disturbing the chosen drawing style. */
+  setXray(on: boolean): void {
+    this.#xray = on;
+    for (const [id, c] of this.#cache) this.#applyStyle(c, this.#session.document.solids.get(id));
+    this.#dirty = true;
+  }
+
+  get xray(): boolean {
+    return this.#xray;
+  }
+
+  /** X-ray strength: low enough to see through, high enough to read a form. */
+  static readonly XRAY_OPACITY = 0.28;
 
   get style(): "shaded" | "hiddenLine" | "edges" {
     return this.#style;
@@ -574,14 +618,10 @@ export class View {
     mat.roughness = solid.meta.roughness;
     mat.metalness = solid.meta.metallic;
     // Translucent geometry must not write depth, or it hides the edges of
-    // whatever sits behind it and looks like a hole rather than glass.
-    const opaque = solid.meta.opacity >= 1;
-    mat.transparent = !opaque;
-    mat.opacity = solid.meta.opacity;
-    mat.depthWrite = opaque;
-    c.mesh.castShadow = opaque && this.#shadows && this.#style !== "edges";
-    c.mesh.visible = !solid.meta.hidden && this.#style !== "edges";
-    c.edges.visible = !solid.meta.hidden && this.#style !== "shaded";
+    // whatever sits behind it and looks like a hole rather than glass. X-ray
+    // forces this on for every solid, so the whole model reads as one plane of
+    // glass; the applied values live in `#applyStyle` so toggling x-ray does
+    // not have to rebuild the mesh.
     this.#applyStyle(c, solid);
   }
 
@@ -593,29 +633,43 @@ export class View {
   #applyStyle(c: CachedMesh, solid?: Solid): void {
     const mat = c.mesh.material as THREE.MeshStandardMaterial;
     const hidden = solid ? solid.meta.hidden : false;
+    // The solid's own opacity, unless x-ray is on: then everything is equally
+    // see-through, including solids the user has already made translucent,
+    // because the point of x-ray is to read the whole model at once.
+    const own = solid ? solid.meta.opacity : 1;
+    const opacity = this.#xray ? Math.min(own, View.XRAY_OPACITY) : own;
+    const opaque = opacity >= 1;
+    mat.transparent = !opaque;
+    mat.opacity = opacity;
+    mat.depthWrite = opaque;
     if (this.#style === "shaded") {
       mat.color.copy(c.baseColor);
       mat.visible = true;
       c.edges.visible = !hidden;
       c.mesh.visible = !hidden;
-      c.mesh.castShadow = this.#shadows;
+      // A see-through solid casting a solid shadow reads as a bug.
+      c.mesh.castShadow = this.#shadows && opaque;
       c.mesh.receiveShadow = this.#shadows;
       c.mesh.userData["edgeOnly"] = false;
       (c.edges.material as THREE.LineBasicMaterial).color.set(0x2a2a2a);
-      (c.edges.material as THREE.LineBasicMaterial).opacity = 0.55;
+      (c.edges.material as THREE.LineBasicMaterial).opacity = this.#xray ? 0.9 : 0.55;
+      this.#dirty = true;
       return;
     }
     // Both line styles draw white faces (or none) with black edges, and shadows
     // would betray a face that is meant to read as paper.
     mat.color.set(0xffffff);
-    mat.visible = this.#style === "hiddenLine";
+    // X-ray over a line drawing shows the faces faintly instead of not at all;
+    // otherwise hidden line would ignore the lens entirely.
+    mat.visible = this.#style === "hiddenLine" || this.#xray;
     c.edges.visible = !hidden;
-    c.mesh.visible = true;
+    c.mesh.visible = !hidden;
     c.mesh.castShadow = false;
     c.mesh.receiveShadow = false;
     c.mesh.userData["edgeOnly"] = true;
     (c.edges.material as THREE.LineBasicMaterial).color.set(0x111111);
     (c.edges.material as THREE.LineBasicMaterial).opacity = 1;
+    this.#dirty = true;
   }
 
   #build(solid: Solid): CachedMesh {
@@ -737,13 +791,29 @@ export class View {
   };
 
   #onPointerDown = (e: PointerEvent): void => {
-    this.#downAt = this.#local(e);
+    const local = this.#local(e);
+    this.#downAt = local;
+    // The right button starts a lasso when Select is active; the context menu
+    // is already suppressed on the canvas, so nothing is taken from the user.
+    this.#lasso = isLassoDrag(e.button, this.tool) ? [local] : null;
+    if (this.#lasso) {
+      this.controls.enabled = false;
+      this.#showLasso(this.#lasso);
+    }
   };
 
   #onPointerUp = (e: PointerEvent): void => {
     const down = this.#downAt;
     this.#downAt = null;
     this.#hideMarquee();
+    const path = this.#lasso;
+    this.#lasso = null;
+    this.controls.enabled = true;
+    if (path) {
+      // A lasso is the same gesture as a rectangle: the path decides the rule.
+      this.#finishLasso(path, e.shiftKey);
+      return;
+    }
     if (!down || e.button !== 0) return;
     const to = this.#local(e);
     // A drag is either a marquee or a camera orbit, never a pick.
@@ -802,14 +872,52 @@ export class View {
     if (isDegenerate(box)) return;
     const direction = dragDirection(from.x, to.x);
     const ids = selectByDrag(
-      [...this.#session.document.solids.keys()].filter(
-        (id) => !this.#session.document.solids.get(id)!.meta.hidden,
-      ),
+      this.selectableIds(),
       box,
       direction,
       (id) => this.screenBox(id as SolidId),
     );
     this.#events.onMarquee(ids as SolidId[], shift);
+  }
+
+  /** Finish a lasso: the path's own direction decides window vs crossing. */
+  #finishLasso(path: readonly { x: number; y: number }[], shift: boolean): void {
+    if (!isLassoPath(path)) return;
+    const points = path.map((p) => [p.x, p.y] as const);
+    const ids = selectByLasso(
+      this.selectableIds(),
+      points,
+      (id) => this.screenBox(id as SolidId),
+    );
+    this.#events.onMarquee(ids as SolidId[], shift);
+  }
+
+  /** Ids a selection gesture may pick: everything drawn, minus locked objects. */
+  selectableIds(): string[] {
+    return drawnSolids(this.#session.document)
+      .filter((s) => !s.meta.hidden && !s.meta.locked)
+      .map((s) => s.id);
+  }
+
+  /** Draw the live lasso as an SVG-free polyline, tinted by its rule. */
+  #showLasso(path: readonly { x: number; y: number }[]): void {
+    const el = this.#marqueeEl;
+    if (!el) return;
+    const points = path.map((p) => [p.x, p.y]);
+    const last = points[points.length - 1];
+    if (points.length > 1 && last) points.push([points[0]![0]!, points[0]![1]!]);
+    const crossing = lassoDirection(path.map((p) => [p.x, p.y] as const)) === "crossing";
+    el.hidden = false;
+    el.className = crossing ? "lasso crossing" : "lasso window";
+    el.style.left = "0px";
+    el.style.top = "0px";
+    el.style.width = "100%";
+    el.style.height = "100%";
+    el.style.background = "none";
+    el.style.border = "none";
+    // A polygon in one inline style: one element, no images, no layout thrash
+    // beyond the clip-path itself.
+    el.style.clipPath = `polygon(${points.map(([x, y]) => `${x}px ${y}px`).join(", ")})`;
   }
 
   /** Draw the live drag rectangle, tinted to say which rule it will apply. */
@@ -820,6 +928,11 @@ export class View {
     const crossing = dragDirection(ax, bx) === "crossing";
     el.hidden = false;
     el.className = crossing ? "crossing" : "window";
+    // A rectangle and a lasso share this element, so every rectangle-only style
+    // must be restored here: a leftover clip-path would show the previous lasso.
+    el.style.clipPath = "none";
+    el.style.background = "";
+    el.style.border = "";
     el.style.left = `${box.minX}px`;
     el.style.top = `${box.minY}px`;
     el.style.width = `${box.maxX - box.minX}px`;
@@ -833,6 +946,18 @@ export class View {
   #onPointerMove = (e: PointerEvent): void => {
     if (e.buttons !== 0) {
       const down = this.#downAt;
+      const path = this.#lasso;
+      if (path && this.tool === "select") {
+        const local = this.#local(e);
+        const last = path[path.length - 1]!;
+        // Sampling every few pixels keeps the path short enough to test and
+        // smooth enough to read as the user's own line.
+        if (Math.hypot(local.x - last.x, local.y - last.y) >= LASSO_STEP) {
+          path.push(local);
+          this.#showLasso(path);
+        }
+        return;
+      }
       // Only a select-tool drag is a marquee; anything else is orbiting.
       if (down && this.tool === "select" && !this.gizmo.dragging && e.buttons === 1) {
         this.#showMarquee(down.x, down.y, e.clientX, e.clientY);

@@ -58,11 +58,16 @@ type Upgrader = (raw: Raw) => Raw;
  * 3 -> 4: added the `group` recipe. A 3-file has no groups, so it upgrades by
  * being understood; the group reader still refuses an empty member list, so a
  * 4-file can never contain a group that meshes to nothing.
+ *
+ * 4 -> 5: added the optional `definition` name on an `instance`. A 4-file's
+ * instances are one-off references with no name, which is exactly what a missing
+ * name means here, so the step only marks the file as understood.
  */
 const MIGRATIONS: Record<number, Upgrader> = {
   1: (raw) => ({ ...raw, schemaVersion: 2 }),
   2: (raw) => ({ ...raw, schemaVersion: 3 }),
   3: (raw) => ({ ...raw, schemaVersion: 4 }),
+  4: (raw) => ({ ...raw, schemaVersion: 5 }),
 };
 
 export function deserialize(raw: unknown): DocumentState {
@@ -245,6 +250,9 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
       return {
         kind: "instance",
         source: raw.source,
+        ...(typeof raw.definition === "string" && raw.definition.trim() !== ""
+          ? { definition: raw.definition.trim() }
+          : {}),
         ...(raw.origin === undefined ? {} : { origin: nums(raw.origin, 16, "origin") }),
         matrix,
       };

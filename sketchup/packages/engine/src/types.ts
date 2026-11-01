@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -55,6 +55,16 @@ export type SolidRecipe =
        */
       readonly kind: "instance";
       readonly source: SolidId;
+      /**
+       * Component definition name, when this instance belongs to a named,
+       * reusable component rather than being a one-off live copy.
+       *
+       * The idea a user holds is "these six windows are the same window". The
+       * name is what makes that true of the *set*, not just each copy: renaming
+       * the definition renames all six, and the outliner can say "Window x6".
+       * A plain instance has no definition and is edited one at a time.
+       */
+      readonly definition?: string;
       /**
        * Where the source sits in the world, when it is not at the origin. An
        * instance is read as "the source, here": subtracting this makes that

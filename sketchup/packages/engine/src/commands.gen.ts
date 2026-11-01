@@ -7,6 +7,7 @@ export const commandLabels = {
   'rectangle': 'Rectangle',
   'rotatedRectangle': 'Rotated Rectangle',
   'circle': 'Circle',
+  'polygon': 'Polygon',
   'arc': 'Arc',
   'line': 'Line',
   'pushpull': 'Push/Pull',
@@ -25,6 +26,8 @@ export const commandLabels = {
   'delete': 'Delete',
   'duplicate': 'Duplicate',
   'instance': 'Make Instance',
+  'detachComponent': 'Detach Component',
+  'makeComponent': 'Make Component',
   'array': 'Array',
   'union': 'Union',
   'subtract': 'Subtract',
@@ -44,6 +47,7 @@ export const commandLabels = {
   'viewHiddenLine': 'Style: Hidden Line',
   'viewEdges': 'Style: Edges Only',
   'toggleShadows': 'Toggle Shadows',
+  'toggleXray': 'Toggle X-ray',
   'toggleAxes': 'Toggle Axes',
   'undo': 'Undo',
   'redo': 'Redo',
@@ -57,6 +61,7 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'rectangle': 'r',
   'rotatedRectangle': 'Alt+r',
   'circle': 'c',
+  'polygon': 'Alt+g',
   'arc': 'a',
   'line': 'l',
   'pushpull': 'p',
@@ -73,6 +78,8 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'ungroup': 'Ctrl+Shift+g',
   'explode': 'Shift+g',
   'delete': 'Delete',
+  'detachComponent': 'Alt+Shift+c',
+  'makeComponent': 'Shift+c',
   'viewIso': 'Ctrl+0',
   'viewTop': 'Ctrl+1',
   'viewFront': 'Ctrl+2',
@@ -83,12 +90,13 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'zoomExtents': 'z',
   'projectionOrtho': 'Ctrl+7',
   'projectionPersp': 'Ctrl+8',
+  'toggleXray': 'Alt+x',
   'undo': 'Ctrl+Z',
   'redo': 'Ctrl+Shift+Z',
 };
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
-export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'rotatedRectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'scale', 'paint', 'eraser', 'tape', 'dimension', 'group', 'ungroup', 'explode', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
+export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'rotatedRectangle', 'circle', 'polygon', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'scale', 'paint', 'eraser', 'tape', 'dimension', 'group', 'ungroup', 'explode', 'delete', 'duplicate', 'instance', 'detachComponent', 'makeComponent', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleXray', 'toggleAxes', 'undo', 'redo'];
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
 export function isCommand(id: string): id is CommandId {
@@ -106,6 +114,8 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'rotatedRectangle', label: commandLabels['rotatedRectangle'] };
     case 'circle':
       return { id: 'circle', label: commandLabels['circle'] };
+    case 'polygon':
+      return { id: 'polygon', label: commandLabels['polygon'] };
     case 'arc':
       return { id: 'arc', label: commandLabels['arc'] };
     case 'line':
@@ -142,6 +152,10 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'duplicate', label: commandLabels['duplicate'] };
     case 'instance':
       return { id: 'instance', label: commandLabels['instance'] };
+    case 'detachComponent':
+      return { id: 'detachComponent', label: commandLabels['detachComponent'] };
+    case 'makeComponent':
+      return { id: 'makeComponent', label: commandLabels['makeComponent'] };
     case 'array':
       return { id: 'array', label: commandLabels['array'] };
     case 'union':
@@ -180,6 +194,8 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'viewEdges', label: commandLabels['viewEdges'] };
     case 'toggleShadows':
       return { id: 'toggleShadows', label: commandLabels['toggleShadows'] };
+    case 'toggleXray':
+      return { id: 'toggleXray', label: commandLabels['toggleXray'] };
     case 'toggleAxes':
       return { id: 'toggleAxes', label: commandLabels['toggleAxes'] };
     case 'undo':

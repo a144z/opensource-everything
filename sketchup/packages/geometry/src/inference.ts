@@ -12,7 +12,17 @@ import type { Vec3 } from "./index.js";
 import { distance, sub } from "./index.js";
 import { snapVec } from "./units.js";
 
-export type InferenceKind = "vertex" | "midpoint" | "centre" | "axis" | "on-face" | "grid" | "none";
+export type InferenceKind =
+  | "vertex"
+  | "midpoint"
+  | "centre"
+  | "quadrant"
+  | "perpendicular"
+  | "axis"
+  | "on-face"
+  | "on-edge"
+  | "grid"
+  | "none";
 
 export interface InferenceGlyph {
   readonly kind: InferenceKind;
@@ -25,8 +35,11 @@ export const GLYPHS: Readonly<Record<InferenceKind, InferenceGlyph>> = {
   vertex: { kind: "vertex", glyph: "", label: "Endpoint" },
   midpoint: { kind: "midpoint", glyph: "", label: "Midpoint" },
   centre: { kind: "centre", glyph: "", label: "Centre" },
+  quadrant: { kind: "quadrant", glyph: "", label: "Quadrant" },
+  perpendicular: { kind: "perpendicular", glyph: "", label: "Perpendicular" },
   axis: { kind: "axis", glyph: "", label: "On axis" },
   "on-face": { kind: "on-face", glyph: "", label: "On face" },
+  "on-edge": { kind: "on-edge", glyph: "", label: "On edge" },
   grid: { kind: "grid", glyph: "", label: "On grid" },
   none: { kind: "none", glyph: "", label: "" },
 };
@@ -34,6 +47,8 @@ export const GLYPHS: Readonly<Record<InferenceKind, InferenceGlyph>> = {
 export interface SnapCandidate {
   readonly kind: InferenceKind;
   readonly point: Vec3;
+  /** Unit normal of the face or edge the point lies on; absent for vertices. */
+  readonly normal?: Vec3;
 }
 
 export interface InferenceInput {
@@ -55,6 +70,8 @@ export interface InferenceResult {
   readonly point: Vec3;
   readonly glyph: InferenceGlyph;
   readonly snapped: boolean;
+  /** Unit normal of the surface snapped to, when the hit came from a face. */
+  readonly normal?: Vec3;
 }
 
 /** Screen-space snap radius in pixels, converted to mm by the caller. */
@@ -82,12 +99,12 @@ export function infer(input: InferenceInput): InferenceResult {
   if (lock) {
     const projected = projectOnAxis(cursor, origin, lock);
     if (best && distance(projected, best.point) <= tolerance) {
-      return { point: best.point, glyph: GLYPHS[best.kind], snapped: true };
+      return withNormal(best, { point: best.point, glyph: GLYPHS[best.kind], snapped: true });
     }
     return { point: withAxisLabel(projected, lock), glyph: GLYPHS.axis, snapped: true };
   }
 
-  if (best) return { point: best.point, glyph: GLYPHS[best.kind], snapped: true };
+  if (best) return withNormal(best, { point: best.point, glyph: GLYPHS[best.kind], snapped: true });
 
   const step = input.gridStep ?? 0;
   if (step > 0) {
@@ -98,7 +115,19 @@ export function infer(input: InferenceInput): InferenceResult {
 }
 
 function rank(kind: InferenceKind): number {
-  return kind === "vertex" ? 3 : kind === "midpoint" ? 2 : kind === "centre" ? 1 : 0;
+  // A named point beats an inferred one, and among named points the more
+  // specific wins: an endpoint is a corner the user can see, a midpoint is
+  // computed from it. Quadrants are the points of an arc or circle where a
+  // dimension is easiest to read, so they beat a plain centre.
+  return kind === "vertex"
+    ? 4
+    : kind === "midpoint" || kind === "perpendicular"
+      ? 3
+      : kind === "quadrant"
+        ? 2
+        : kind === "centre"
+          ? 1
+          : 0;
 }
 
 /** Foot of the perpendicular from `p` onto the ray `origin + taxis`. */
@@ -114,6 +143,11 @@ export function projectOnAxis(p: Vec3, origin: Vec3, axis: Vec3): Vec3 {
 function withAxisLabel(p: Vec3, _axis: Vec3): Vec3 {
   const r = (n: number): number => Math.round(n * 1e6) / 1e6;
   return [r(p[0]), r(p[1]), r(p[2])];
+}
+
+/** Carry the snapped surface's normal through to the caller, when it has one. */
+function withNormal(candidate: SnapCandidate, result: InferenceResult): InferenceResult {
+  return candidate.normal ? { ...result, normal: candidate.normal } : result;
 }
 
 /**
@@ -164,4 +198,134 @@ export function vertices(positions: Float32Array): readonly SnapCandidate[] {
     out.push({ kind: "vertex", point: [positions[i]!, positions[i + 1]!, positions[i + 2]!] });
   }
   return out;
+}
+
+/**
+ * Centres of every flat face in a flat triangle list, one per distinct plane.
+ *
+ * A box has six faces and a triangulated face has two triangles; both must yield
+ * one centre, or the cursor would find two "Centre" points a few millimetres
+ * apart and snap to whichever came first. Faces are keyed by their plane
+ * (normal + offset), which is exact for the boxes and extrusions this app makes.
+ */
+export function faceCentres(positions: Float32Array): readonly SnapCandidate[] {
+  interface Face {
+    normal: Vec3;
+    offset: number;
+    sum: [number, number, number];
+    count: number;
+  }
+  const faces = new Map<string, Face>();
+  for (let i = 0; i + 8 < positions.length; i += 9) {
+    const a: Vec3 = [positions[i]!, positions[i + 1]!, positions[i + 2]!];
+    const b: Vec3 = [positions[i + 3]!, positions[i + 4]!, positions[i + 5]!];
+    const c: Vec3 = [positions[i + 6]!, positions[i + 7]!, positions[i + 8]!];
+    const n = unit(triangleNormal(a, b, c));
+    if (!n) continue;
+    const offset = n[0] * a[0] + n[1] * a[1] + n[2] * a[2];
+    const key = `${n.map((v) => v.toFixed(3)).join(",")}|${offset.toFixed(3)}`;
+    const face = faces.get(key);
+    if (face) {
+      face.count += 3;
+      face.sum[0] += a[0] + b[0] + c[0];
+      face.sum[1] += a[1] + b[1] + c[1];
+      face.sum[2] += a[2] + b[2] + c[2];
+    } else {
+      faces.set(key, {
+        normal: n,
+        offset,
+        sum: [a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]],
+        count: 3,
+      });
+    }
+  }
+  return [...faces.values()].map((f) => ({
+    kind: "centre" as const,
+    point: [f.sum[0] / f.count, f.sum[1] / f.count, f.sum[2] / f.count] as Vec3,
+    normal: f.normal,
+  }));
+}
+
+/**
+ * Quadrant points of the model's bounding box: the four corners of the
+ * footprint at the top and bottom, plus the mid-edge points of each side.
+ *
+ * These stand in for the quadrant points of arcs and circles, which this app
+ * does not keep as entities: after a circle is drawn it is a mesh, and the only
+ * meaningful "quadrant" left is the extreme of its bounds. That is exactly what
+ * SketchUp uses a quadrant for, reading off a width or height.
+ */
+export function boundsQuadrants(min: Vec3, max: Vec3): readonly SnapCandidate[] {
+  const xs = [min[0], (min[0] + max[0]) / 2, max[0]];
+  const ys = [min[1], (min[1] + max[1]) / 2, max[1]];
+  const zs = [min[2], max[2]];
+  const out: SnapCandidate[] = [];
+  for (const z of zs) {
+    for (const [xi, yi] of [
+      [0, 1],
+      [2, 1],
+      [1, 0],
+      [1, 2],
+    ] as const) {
+      out.push({ kind: "quadrant", point: [xs[xi]!, ys[yi]!, z] });
+    }
+  }
+  return out;
+}
+
+/**
+ * The foot of the perpendicular from `from` to the nearest edge of a mesh.
+ *
+ * "Perpendicular" in SketchUp means: while drawing or moving from a point, the
+ * cursor snaps to the place on an edge that makes a right angle with the line
+ * you are drawing. Given the segments of the target mesh, this returns the
+ * closest such foot within `tolerance`, or null.
+ */
+export function perpendicularFeet(
+  from: Vec3,
+  positions: Float32Array,
+  tolerance: number,
+): readonly SnapCandidate[] {
+  const out: SnapCandidate[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i + 8 < positions.length; i += 9) {
+    const tri: readonly Vec3[] = [
+      [positions[i]!, positions[i + 1]!, positions[i + 2]!],
+      [positions[i + 3]!, positions[i + 4]!, positions[i + 5]!],
+      [positions[i + 6]!, positions[i + 7]!, positions[i + 8]!],
+    ];
+    for (let e = 0; e < 3; e++) {
+      const p = tri[e]!;
+      const q = tri[(e + 1) % 3]!;
+      const foot = footOnSegment(from, p, q);
+      if (distance(foot, from) > tolerance) continue;
+      const key = `${foot.map((v) => v.toFixed(3)).join(",")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ kind: "perpendicular", point: foot });
+    }
+  }
+  return out;
+}
+
+/** Closest point to `from` on segment `p`-`q`, clamped to the segment. */
+export function footOnSegment(from: Vec3, p: Vec3, q: Vec3): Vec3 {
+  const d = sub(q, p);
+  const len2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+  if (len2 < 1e-12) return p;
+  const t = ((from[0] - p[0]) * d[0] + (from[1] - p[1]) * d[1] + (from[2] - p[2]) * d[2]) / len2;
+  const clamped = Math.max(0, Math.min(1, t));
+  return [p[0] + d[0] * clamped, p[1] + d[1] * clamped, p[2] + d[2] * clamped];
+}
+
+function triangleNormal(a: Vec3, b: Vec3, c: Vec3): Vec3 {
+  const u: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const v: Vec3 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  return [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+}
+
+function unit(v: Vec3): Vec3 | null {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  if (len < 1e-12) return null;
+  return [v[0] / len, v[1] / len, v[2] / len];
 }

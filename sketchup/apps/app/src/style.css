@@ -453,6 +453,20 @@ kbd {
   background: #7fd69422;
 }
 
+/* A lasso is the same element, shaped by a clip-path the view supplies. It has
+   no border of its own: the shape is the outline, drawn as a translucent slab. */
+#marquee.lasso {
+  border: none;
+}
+
+#marquee.lasso.window {
+  background: #5fb0e833;
+}
+
+#marquee.lasso.crossing {
+  background: #7fd69433;
+}
+
 /* Command palette (Ctrl+K). Sits above the hint so it never fights for space. */
 #palette {
   position: fixed;

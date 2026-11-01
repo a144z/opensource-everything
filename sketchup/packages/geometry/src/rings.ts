@@ -33,6 +33,33 @@ export function circlePoints(
 }
 
 /**
+ * A regular polygon on the ground plane, counter-clockwise, with one vertex
+ * where `towards` points.
+ *
+ * A polygon is a circle with a small, exact number of segments, which is why it
+ * shares the start-angle rule: the vertex under the cursor stays under the
+ * cursor. Sides are clamped to 3..96: two sides cannot enclose an area, and past
+ * about a hundred a "polygon" is a circle and should be drawn as one.
+ */
+export function polygonPoints(
+  centre: Vec3,
+  towards: Vec3,
+  radius: number,
+  sides: number,
+): Vec2[] {
+  if (!(radius > 0)) throw new RangeError("polygon radius must be positive");
+  if (!Number.isFinite(sides)) throw new RangeError("polygon needs a whole number of sides");
+  const n = Math.min(96, Math.max(3, Math.round(sides)));
+  const start = Math.atan2(towards[1] - centre[1], towards[0] - centre[0]);
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = start + (i / n) * Math.PI * 2;
+    out.push([centre[0] + Math.cos(a) * radius, centre[1] + Math.sin(a) * radius]);
+  }
+  return out;
+}
+
+/**
  * Three-point arc on the ground plane: `points[0]` is the start, `points[1]`
  * (or `through`, once both are known) lies on the arc, and the end is the last
  * known point.
