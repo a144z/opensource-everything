@@ -147,3 +147,32 @@ describe("ranking the new points", () => {
     expect(r.normal).toBeUndefined();
   });
 });
+
+describe("snapping inside the screen tolerance", () => {
+  // The tolerance is a screen distance, so what counts is mm per pixel: at 2 mm
+  // per pixel a 10 px radius is 20 mm, and a corner 12 mm off must still win.
+  it("reaches a box corner from twelve pixels away", () => {
+    const r = infer({ cursor: [12, 0, 0], candidates: [{ kind: "vertex", point: [0, 0, 0] }], mmPerPixel: 2 });
+    expect(r.snapped).toBe(true);
+    expect(r.glyph.kind).toBe("vertex");
+    expect(r.point).toEqual([0, 0, 0]);
+  });
+
+  it("gives up outside it", () => {
+    const r = infer({ cursor: [25, 0, 0], candidates: [{ kind: "vertex", point: [0, 0, 0] }], mmPerPixel: 2 });
+    expect(r.snapped).toBe(false);
+    expect(r.glyph.kind).toBe("none");
+  });
+
+  it("snaps a midpoint the same way a corner does", () => {
+    const mid: SnapCandidate = { kind: "midpoint", point: [50, 0, 0] };
+    const r = infer({ cursor: [53, 1, 0], candidates: [mid], mmPerPixel: 1 });
+    expect(r.point).toEqual([50, 0, 0]);
+    expect(r.glyph.label).toBe("Midpoint");
+  });
+
+  it("treats a nonsense scale as one mm per pixel rather than snapping everything", () => {
+    const r = infer({ cursor: [100, 0, 0], candidates: [{ kind: "vertex", point: [0, 0, 0] }], mmPerPixel: 0 });
+    expect(r.snapped).toBe(false);
+  });
+});

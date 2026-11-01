@@ -1691,6 +1691,8 @@ interface FitCheckHarness {
   drawLine(points: [number, number][], close: boolean): { kind: string; id: string } | null;
   /** One click on the ground plane at (x, y), through the active tool. */
   clickGround(point: [number, number]): void;
+  /** Move the pointer over the ground plane without clicking. */
+  hoverGround(point: [number, number]): void;
   /** The lone selected object, which is what a finishing tool just added. */
   lastAdded(): string | null;
   /** The status line, as it reads right now. */
@@ -1705,6 +1707,10 @@ interface FitCheckHarness {
   typedText(): string;
   /** Points in the live line chain, 0 when none. */
   chainLength(): number;
+  /** The axis the pointer is locked to, or null. */
+  axis(): "x" | "y" | "z" | null;
+  /** Shift, through the same path the key handler uses. */
+  setShift(on: boolean): void;
   /** The stored keymap text, or null, so persistence can be checked. */
   keymapStorage(): string | null;
   /** Rebind through the same path the palette uses. */
@@ -1778,11 +1784,16 @@ window.fitcheck = {
   hasPending: () => tools.hasPending,
   typedText: () => tools.typedText,
   chainLength: () => tools.chainLength,
+  axis: () => tools.axisName,
+  setShift: (on) => tools.setModifiers({ shift: on }),
   edgePoints(id) {
     const solid = session.document.solids.get(id);
     // A typed-length check measures the segment the typing placed, so the raw
     // path has to be readable: bounds would only show the chain's extent.
     return solid && solid.recipe.kind === "edge" ? solid.recipe.points.map((pt) => [pt[0], pt[1]]) : null;
+  },
+  hoverGround(point: [number, number]) {
+    tools.hover([point[0], point[1], 0], 0, 0);
   },
   clickGround(point: [number, number]) {
     tools.hover([point[0], point[1], 0], 0, 0);

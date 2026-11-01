@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {
   arcPoints,
+  axisInference,
   circlePoints,
   closedArc,
   counterClockwise,
@@ -221,7 +222,12 @@ export class ToolController {
    * so the host tells the tool rather than the tool asking on every frame.
    */
   setModifiers(mods: { shift?: boolean }): void {
-    this.#square = mods.shift ?? false;
+    const shift = mods.shift ?? false;
+    this.#square = shift;
+    // One key, two meanings, as in SketchUp: on a rectangle Shift squares the
+    // corner, and every other tool reads it as "stay on this axis". The view
+    // owns the flag because the move/rotate handlers ask it too.
+    this.#host.view.setAxisLock(shift);
   }
 
   /** Show the side count as it is typed, and adopt it live where it is valid. */
@@ -674,6 +680,7 @@ export class ToolController {
       const to = this.#constrain(p.from, snapped.point);
       p.current = to;
       this.#drawChain(p.points, to);
+      this.#guideAxis(p.from, to);
       // Typed text wins over the cursor, the same rule every other tool uses.
       const typed = this.#typed ? parseLength(this.#typed, this.#host.unit())?.mm ?? null : null;
       this.#measure = lengthValue(
@@ -683,10 +690,10 @@ export class ToolController {
         typed ? "Enter to place" : `${this.#glyphHint()} click to place, on the start point to close`.trim(),
         typed ? "typed" : "proposed",
       );
+      // The inference badge leads: while drawing, "on the red axis" is the
+      // reading the user needs, and the key help can follow it.
       this.#host.setHint(
-        p.points.length >= 2
-          ? "Esc cancels, Backspace steps back, Enter finishes the chain"
-          : "Esc cancels, Backspace steps back",
+        `${this.#glyphHint()} ${p.points.length >= 2 ? "Esc cancels, Backspace steps back, Enter finishes the chain" : "Esc cancels, Backspace steps back"}`.trim(),
       );
     } else if (p?.kind === "tape" || p?.kind === "dimension") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
@@ -858,9 +865,29 @@ export class ToolController {
   }
 
   #glyph = "";
+  /** The axis the pointer is locked to, when it is on one. */
+  #axis: "x" | "y" | "z" | null = null;
+
+  /** The axis the pointer is locked to, for tests and the status line. */
+  get axisName(): "x" | "y" | "z" | null {
+    return this.#axis;
+  }
 
   #glyphHint(): string {
+    // The axis wins the badge when both apply: "on the green axis" is the more
+    // useful thing to read while drawing a wall than "on grid".
+    if (this.#axis) return `[On ${axisWord(this.#axis)} axis]`;
     return this.#glyph ? `[${this.#glyph}]` : "";
+  }
+
+  /**
+   * Show the coloured guide for a segment that lies on a world axis, and record
+   * the axis so the status line can name it. A free segment hides the guide.
+   */
+  #guideAxis(from: Vec3, to: Vec3): void {
+    const found = axisInference(from, to);
+    this.#axis = found ? found.name : null;
+    this.#host.view.showAxisGuide(found ? { from, to, colour: found.colour } : null);
   }
 
   /** Shift locks to the dominant axis; otherwise the point passes through. */
@@ -1561,6 +1588,8 @@ export class ToolController {
     this.#pending = null;
     this.#typed = "";
     this.#measure = null;
+    this.#axis = null;
+    this.#host.view.showAxisGuide(null);
     this.#clearPreview();
   }
 
@@ -1626,6 +1655,13 @@ export class ToolController {
     this.#preview.computeLineDistances();
     this.#host.view.invalidate();
   }
+}
+
+const AXIS_WORDS = { x: "red", y: "green", z: "blue" } as const;
+
+/** The colour name of an axis, which is what SketchUp's inference calls it. */
+function axisWord(axis: "x" | "y" | "z"): string {
+  return AXIS_WORDS[axis];
 }
 
 const HINTS: Record<Tool, string> = {

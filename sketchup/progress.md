@@ -3,6 +3,48 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-01 (inference + glyphs)
+
+Done
+- L1-6 passes. Shift locks the pointer to a world axis on every tool that
+  constrains, the segment is drawn with SketchUp's red/green/blue guide and a
+  square at the inference point, and the status line names the lock
+  (`[On red axis]`) instead of the old key help that hid it.
+- `axisInference(from, to, tolerance?)` in `packages/geometry/src/inference.ts`:
+  only pure code, decides which world axis a post-constraint segment lies on and
+  returns its sign and colour. `AXIS_COLOURS` is the single source for red,
+  green and blue.
+- `View.showAxisGuide({ from, to, colour } | null)` draws the guide line (runs
+  on 10 % past the cursor, clamped to 50 mm) and an 8 mm square at the point.
+  `View.setAxisLock(on)` lets the tools set the flag the canvas handlers own.
+- Shift is now one key with two meanings, as in SketchUp: a rectangle squares
+  its corner (`#square`), everything else locks to the dominant axis.
+- Tests: 13 for `axisInference`, 4 for screen-tolerance snapping (a corner 12 mm
+  off wins at 2 mm/px, gives up past the radius, a midpoint snaps alike), and 4
+  browser checks (Shift locks red, the hint names it, the locked segment has no
+  lateral drift and is exactly 500 long, an unshifted drag keeps its diagonal).
+
+Decisions
+- The guide lives in the view, not the tool: where a coloured line is drawn is a
+  presentation choice, and the tool never needs to know its length or styling.
+- The line tool's hover now leads its hint with the inference badge. Before, it
+  overwrote the badge every frame, so the lock was computed and then hidden.
+- `#cancel()` is the one place that drops the guide; a gesture that ends without
+  it would leave a coloured line hanging after the click.
+
+Open bugs
+- none known; gate green (all checks, typecheck 0 errors, 453/453 tests, smoke).
+- Fixed a slow disk leak: every smoke run left its Chrome profile (~30 MB) in
+  temp because `chrome.kill()` returned before the handles were released. The
+  script now kills the process tree, retries the delete, and leaves nothing. 46
+  stale profiles had filled the disk to 0 bytes and broke the first typecheck of
+  this cycle.
+
+Next
+1. L1-7 - Offset (click a face, drag to inset, typed distance).
+2. Then L1-8 follow-me, L1-10 dimension, L1-11 tape, L1-9 sticky/weld,
+   L3-5/6/7, L1-15 soften (Ctrl).
+
 ## Cycle 2026-11-01 (line tool)
 
 Done

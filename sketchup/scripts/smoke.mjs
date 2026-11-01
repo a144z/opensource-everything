@@ -9,7 +9,7 @@
  * Requires Chrome on PATH at the default Windows location, or CHROME_BIN set.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -368,6 +368,55 @@ async function lineProbe(api) {
 }
 
 /**
+ * Inference (L1-6): with the pointer diagonal from the start, Shift locks the
+ * segment to a world axis and the status line names it; the snapped point then
+ * lies exactly on that axis, and a free drag still goes diagonal.
+ */
+async function inferenceProbe(api) {
+  return evaluate(
+    api,
+    `(() => {
+      const h = window.fitcheck;
+      if (!h) return { skipped: true };
+      h.run('select');
+      h.useTool('line');
+      h.clickGround([0, 0]);
+      // A diagonal that is mostly along red: Shift must flatten it to red.
+      h.hoverGround([1000, 300]);
+      h.setShift(true);
+      h.hoverGround([1000, 300]);
+      const lockedAxis = h.axis();
+      const lockedHint = h.hint();
+      h.typeText('500', false);
+      h.typeText('', true);
+      h.typeText('', true);
+      const id = h.lastAdded();
+      const pts = id ? h.edgePoints(id) : null;
+      h.setShift(false);
+      h.useTool('select');
+      const locked = pts && pts.length >= 2 ? { dx: pts[1][0] - pts[0][0], dy: pts[1][1] - pts[0][1] } : null;
+
+      // Without Shift the same gesture keeps its diagonal. Choosing the tool
+      // again is required: the first chain switched back to Select above.
+      h.useTool('line');
+      h.hoverGround([0, 2000]);
+      h.clickGround([0, 2000]);
+      h.hoverGround([1000, 2300]);
+      h.typeText('500', false);
+      h.typeText('', true);
+      h.typeText('', true);
+      const freeId = h.lastAdded();
+      const freePts = freeId ? h.edgePoints(freeId) : null;
+      h.useTool('select');
+      const free = freePts && freePts.length >= 2 ? { dx: freePts[1][0] - freePts[0][0], dy: freePts[1][1] - freePts[0][1] } : null;
+      h.run('select');
+      h.escape();
+      return { skipped: false, lockedAxis, lockedHint, locked, free };
+    })()`,
+  );
+}
+
+/**
  * Rebinding, persisted. Part one changes Rectangle from R to Alt+Q and checks the
  * old key stopped working and the new one started; part two runs after a page
  * reload, which is the only honest proof the change went to `localStorage` and
@@ -526,6 +575,20 @@ try {
     checks.push(["Escape leaves nothing behind", line.escaped === 0, String(line.escaped)]);
   }
 
+  const infer = await inferenceProbe(api);
+  if (infer.skipped) {
+    console.log("SKIP  inference (no window.fitcheck harness)");
+  } else {
+    checks.push(["Shift locks to the red axis", infer.lockedAxis === "x", String(infer.lockedAxis)]);
+    checks.push(["the hint names the axis", /red axis/i.test(infer.lockedHint ?? ""), String(infer.lockedHint)]);
+    checks.push(
+      ["a locked segment lies on its axis", infer.locked !== null && Math.abs(infer.locked.dy) < 0.01 && Math.abs(infer.locked.dx) === 500, JSON.stringify(infer.locked)],
+    );
+    checks.push(
+      ["a free segment keeps its diagonal", infer.free !== null && Math.abs(infer.free.dy) > 1, JSON.stringify(infer.free)],
+    );
+  }
+
   const groups = await groupProbe(api);
   if (groups.skipped) {
     console.log("SKIP  grouping (no window.fitcheck harness)");
@@ -601,10 +664,24 @@ try {
 } finally {
   chrome.kill();
   server?.kill();
+  // Chrome writes its profile through a helper process and Windows refuses to
+  // delete a held file, so killing the launcher is not enough: give the whole
+  // tree a moment, then retry a few times. Every run used to leave ~30 MB of
+  // profile in temp, which filled the disk after a few dozen cycles.
   try {
-    rmSync(profile, { recursive: true, force: true });
+    if (chrome.exitCode === null && chrome.pid) {
+      spawnSync("taskkill", ["/F", "/T", "/PID", String(chrome.pid)], { windowsHide: true });
+    }
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        rmSync(profile, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
   } catch {
-    // Chrome may still hold a handle; the temp dir is disposable.
+    // The temp dir is disposable; a failed delete must not fail the run.
   }
   process.exit(code);
 }

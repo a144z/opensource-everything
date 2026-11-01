@@ -164,6 +164,87 @@ export function bestAxis(from: Vec3, to: Vec3): Vec3 {
   return [d[0] < 0 ? -1 : 1, 0, 0];
 }
 
+/** A world axis an inference can lock to, with SketchUp's colour for it. */
+export interface AxisInference {
+  /** Unit axis: [±1,0,0], [0,±1,0] or [0,0,±1]. */
+  readonly axis: Vec3;
+  /** "x" red, "y" green, "z" blue. */
+  readonly name: "x" | "y" | "z";
+  /** 0xRRGGBB, SketchUp's axis colours: red, green, blue. */
+  readonly colour: number;
+}
+
+/**
+ * SketchUp's axis colours, as 0xRRGGBB. The viewport, the glyph badge and the
+ * axis-lock test all read this table rather than their own literals, so a theme
+ * change is one edit and a test can assert the two agree.
+ */
+export const AXIS_COLOURS: Readonly<Record<"x" | "y" | "z", number>> = {
+  x: 0xff3b30,
+  y: 0x34c759,
+  z: 0x0a84ff,
+};
+
+/**
+ * The axis a constrained segment lies on, or null when it lies on none.
+ * `from` and `to` are the two ends after constraint; a segment parallel to a
+ * world axis within `tolerance` (mm of lateral drift) is on that axis.
+ *
+ * The threshold is lateral drift, not an angle: SketchUp locks a line that is
+ * within about half a millimetre of an axis however long it is, because that is
+ * what the user can see at the cursor. Rejecting a bad tolerance rather than
+ * trusting it keeps a caller's uninitialised `0` from snapping to nothing.
+ */
+export function axisInference(from: Vec3, to: Vec3, tolerance: number = 0.5): AxisInference | null {
+  const tol = tolerance > 0 ? tolerance : 0.5;
+  const d = sub(to, from);
+  const dx = d[0];
+  const dy = d[1];
+  const dz = d[2];
+  // A click that has not moved yet is not on any axis, and would otherwise
+  // report every axis at once.
+  if (Math.hypot(dx, dy, dz) < 1e-6) return null;
+
+  const ex = Math.abs(dx);
+  const ey = Math.abs(dy);
+  const ez = Math.abs(dz);
+
+  // An axis qualifies when both of its lateral components are inside the drift
+  // and its own length clears that same threshold.
+  const onX = ey <= tol && ez <= tol && ex > tol;
+  const onY = ex <= tol && ez <= tol && ey > tol;
+  const onZ = ex <= tol && ey <= tol && ez > tol;
+  if (!onX && !onY && !onZ) return null;
+  // Several can qualify (a long segment with small drift on two axes); the
+  // longer component is the one the user meant, and ties go x, then y, then z.
+  const pick = longerOf(ex, ey, ez, onX, onY, onZ);
+
+  return {
+    axis: pick === "x" ? [dx < 0 ? -1 : 1, 0, 0] : pick === "y" ? [0, dy < 0 ? -1 : 1, 0] : [0, 0, dz < 0 ? -1 : 1],
+    name: pick,
+    colour: AXIS_COLOURS[pick],
+  };
+}
+
+/** The longest qualifying component, ties favouring x before y before z. */
+function longerOf(ex: number, ey: number, ez: number, onX: boolean, onY: boolean, onZ: boolean): "x" | "y" | "z" {
+  let best: "x" | "y" | "z" = "x";
+  let bestLen = -1;
+  // Strict ">" keeps the earlier axis on a tie. Two axes cannot both tie as the
+  // longest (the shared component would break the other's lateral test), but the
+  // order is fixed anyway so a future tolerance change cannot rearrange it.
+  for (const [name, len, on] of [
+    ["x", ex, onX],
+    ["y", ey, onY],
+    ["z", ez, onZ],
+  ] as const) {
+    if (!on || len <= bestLen) continue;
+    best = name;
+    bestLen = len;
+  }
+  return best;
+}
+
 /** Midpoints of every edge of a flat triangle list; feeds `candidates`. */
 export function edgeMidpoints(positions: Float32Array): readonly SnapCandidate[] {
   const out: SnapCandidate[] = [];

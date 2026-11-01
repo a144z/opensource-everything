@@ -127,6 +127,10 @@ export class View {
   #axesVisible = true;
   /** Live drag rectangle; created lazily so the overlay sits over the canvas. */
   #marqueeEl: HTMLElement | null = null;
+  /** Inference axis guide; created on first use so a tool that never infers draws nothing. */
+  #guideLine: THREE.Line | null = null;
+  /** The square at the inference point, sharing the guide's colour. */
+  #guideMarker: THREE.LineSegments | null = null;
 
   tool: Tool = "select";
 
@@ -230,6 +234,18 @@ export class View {
     return this.#shift;
   }
 
+  /**
+   * Set the lock from a state the tools already know. Shift is tracked here by
+   * the canvas handlers, but a held key that arrived as a keydown (or a test
+   * driving `setModifiers`) must also reach the overlays, so this is the one
+   * setter both paths share.
+   */
+  setAxisLock(on: boolean): void {
+    if (this.#shift === on) return;
+    this.#shift = on;
+    this.#dirty = true;
+  }
+
   invalidate(): void {
     this.#dirty = true;
   }
@@ -245,6 +261,85 @@ export class View {
       return (2 * distance * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / px;
     }
     return (cam.top - cam.bottom) / cam.zoom / px;
+  }
+
+  /**
+   * The red/green/blue guide that shows which world axis an inference has
+   * locked to, plus the inference point itself marked with a small square.
+   * SketchUp draws this so the user can see the lock before committing a click.
+   */
+  showAxisGuide(
+    guide: { readonly from: Vec3; readonly to: Vec3; readonly colour: number } | null,
+  ): void {
+    const objects = this.#ensureGuide();
+    const { line, marker } = objects;
+    if (!guide) {
+      // Called every pointer move, so only a real visibility change may
+      // invalidate: a redraw per frame for a guide nobody can see is waste.
+      if (!line.visible && !marker.visible) return;
+      line.visible = false;
+      marker.visible = false;
+      this.invalidate();
+      return;
+    }
+    const from = new THREE.Vector3(...guide.from);
+    const to = new THREE.Vector3(...guide.to);
+    const length = from.distanceTo(to);
+    // SketchUp's inference line runs on past the cursor, which is what tells it
+    // apart from a drawn edge. The overshoot is proportional but capped, so a
+    // lock across a house does not throw a tail across the whole site.
+    const end = to.clone();
+    if (length >= 0.5) {
+      const overshoot = Math.min(length * 0.1, 50);
+      end.addScaledVector(to.clone().sub(from).normalize(), overshoot);
+    }
+    line.geometry.setFromPoints([from, end]);
+    (line.material as THREE.LineBasicMaterial).color.set(guide.colour);
+    (marker.material as THREE.LineBasicMaterial).color.set(guide.colour);
+    // The square is flat in world XY, half a side either way from the point.
+    const h = 4;
+    const [x, y, z] = guide.to;
+    marker.geometry.setFromPoints([
+      new THREE.Vector3(x - h, y - h, z),
+      new THREE.Vector3(x + h, y - h, z),
+      new THREE.Vector3(x + h, y + h, z),
+      new THREE.Vector3(x - h, y + h, z),
+    ]);
+    line.visible = true;
+    marker.visible = true;
+    this.invalidate();
+  }
+
+  /**
+   * The guide and its marker, built on first use. Both ignore depth and draw
+   * after the model, like every other annotation overlay, and their geometries
+   * are reused through `setFromPoints` so a move never allocates or disposes.
+   */
+  #ensureGuide(): { line: THREE.Line; marker: THREE.LineSegments } {
+    if (!this.#guideLine) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }),
+      );
+      line.renderOrder = 20;
+      line.visible = false;
+      // Overlays are decoration, never a pick target or a cull candidate.
+      line.raycast = () => {};
+      this.scene.add(line);
+      this.#guideLine = line;
+    }
+    if (!this.#guideMarker) {
+      const marker = new THREE.LineSegments(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }),
+      );
+      marker.renderOrder = 20;
+      marker.visible = false;
+      marker.raycast = () => {};
+      this.scene.add(marker);
+      this.#guideMarker = marker;
+    }
+    return { line: this.#guideLine, marker: this.#guideMarker };
   }
 
   zoomExtents(): void {
@@ -480,6 +575,12 @@ export class View {
     // disposed view alive and end every drag in a stale closure.
     window.removeEventListener("pointerup", this.#onPointerUp);
     this.gizmo.getHelper().removeFromParent();
+    for (const guide of [this.#guideLine, this.#guideMarker]) {
+      if (!guide) continue;
+      guide.removeFromParent();
+      guide.geometry.dispose();
+      (guide.material as THREE.Material).dispose();
+    }
     this.controls.dispose();
     this.gizmo.dispose();
     this.#resizeObserver.disconnect();
