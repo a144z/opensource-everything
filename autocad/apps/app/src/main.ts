@@ -1,5 +1,5 @@
 import "./style.css";
-import type { DocumentState, EntityId, Pt } from "@apexus/cad";
+import type { DocumentState, EntityId, PlotOptions, Pt, Sheet, SheetEdit } from "@apexus/cad";
 import {
   SCHEMA_VERSION,
   boundsExpand,
@@ -11,6 +11,7 @@ import {
   entityVisible,
   eraseEntities,
   formatLength,
+  formatScale,
   layerByName,
   measureDimension,
   pickEntity,
@@ -18,6 +19,8 @@ import {
   pt,
   serializeProjectJson,
   setPaperMode,
+  setSheet,
+  sheetOf,
 } from "@apexus/cad";
 import { AppState } from "./state.js";
 import type { Settings } from "./state.js";
@@ -57,12 +60,22 @@ import {
   textTool,
   trimTool,
 } from "./tools.js";
-import { openDxfText, openProject, plotDrawing, plotOptions, readFileText, saveDxf, saveProject } from "./io.js";
+import {
+  exportPlot,
+  openDxfText,
+  openProject,
+  plotDrawing,
+  plotInfo as sheetPlotInfo,
+  plotText,
+  readFileText,
+  saveDxf,
+  saveProject,
+} from "./io.js";
+import type { PlotFormat } from "./io.js";
 
 /**
  * The composition root: owns the elements, the session, the camera and the
- * runner, and does nothing else. Every rule it could have lives in a module —
- * `tools.ts` for gestures, `render.ts` for pixels, `io.ts` for files — so this
+ * runner, and does nothing else. Every rule it could have lives in a module ?? * `tools.ts` for gestures, `render.ts` for pixels, `io.ts` for files ??so this
  * file stays the wiring diagram, not the product.
  */
 
@@ -109,7 +122,7 @@ function setStatus(): void {
   const bits = [`${n} entities${sel ? `, ${sel} selected` : ""}`, `history ${undo}`, d.paper ? "paper" : "model", d.units];
   const bounds = drawingBounds(d);
   if (bounds) bits.push(`${formatLength(bounds.max.x - bounds.min.x, d.units)} x ${formatLength(bounds.max.y - bounds.min.y, d.units)}`);
-  statusEl.textContent = bits.join("  ·  ");
+  statusEl.textContent = bits.join("  繚  ");
   statusEl.classList.remove("bad");
 }
 
@@ -191,6 +204,11 @@ const ALIASES: Record<string, string> = {
   p: "pan",
   sa: "save",
   pr: "plot",
+  pdf: "pdf",
+  export: "pdf",
+  preview: "preview",
+  sheet: "sheet",
+  layout: "sheet",
 };
 
 const toolCtx: ToolContext = {
@@ -259,7 +277,7 @@ function constraintGlyphs(): { text: string; at: Pt; bad: boolean }[] {
     if (!entityVisible(app.doc, e)) continue;
     const attached = dimensionTargets(app.doc, e.id).length >= 2;
     out.push({
-      text: attached ? `▣ ${formatLength(measureDimension(app.doc, e).value, app.doc.units)}` : "▣ unattached",
+      text: attached ? `??${formatLength(measureDimension(app.doc, e).value, app.doc.units)}` : "??unattached",
       at: e.p2,
       bad: !attached,
     });
@@ -273,6 +291,7 @@ let lastGrip: Pt | null = null;
 app.onChange(() => {
   redraw();
   renderLayers();
+  syncSheetPanel();
 });
 
 /* ============================================================== input */
@@ -344,7 +363,7 @@ canvas.addEventListener("mousemove", (e) => {
   }
   const raw = cam.toModel(client);
   lastCursor = raw;
-  cursorEl.textContent = `${formatLength(raw.x, app.doc.units)}, ${formatLength(raw.y, app.doc.units)}  ·  ${(cam.unit * 1000).toFixed(2)} px/m`;
+  cursorEl.textContent = `${formatLength(raw.x, app.doc.units)}, ${formatLength(raw.y, app.doc.units)}  繚  ${(cam.unit * 1000).toFixed(2)} px/m`;
   if (box) {
     box.to = raw;
     redraw();
@@ -412,6 +431,15 @@ canvas.addEventListener("dblclick", () => {
   }
 });
 
+document.addEventListener("keydown", (e) => {
+  // Esc closes the plot preview before it cancels a tool: the preview is a
+  // modal look at the sheet, and leaving it is the more local action.
+  if (e.key === "Escape" && previewEl.dataset["open"] === "1") {
+    closePreview();
+    e.preventDefault();
+  }
+});
+
 input.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     input.value = "";
@@ -454,7 +482,7 @@ function submit(text: string): void {
   if (prompt) {
     const point = answerPoint(prompt, text);
     if (prompt.kind === "point" && point === null && text !== "" && !isKeyword(text, prompt)) {
-      say(`"${text}" is not a point — type x,y, @dx,dy, dist<angle or a distance`, true);
+      say(`"${text}" is not a point ??type x,y, @dx,dy, dist<angle or a distance`, true);
       return;
     }
     if (prompt.kind === "value" && text !== "" && point === null) {
@@ -585,7 +613,17 @@ function runCommand(text: string): void {
       void saveDxf(app, rest || "drawing.dxf").then((m) => say(m));
       return;
     case "plot":
-      void plotDrawing(app, rest || "plot.svg").then((m) => say(m));
+      void plotDrawing(app, "svg").then((m) => say(m));
+      return;
+    case "pdf":
+      void exportPlot(app, "pdf", rest ? Number(rest) || undefined : undefined).then((m) => say(m));
+      return;
+    case "preview":
+      previewOpen();
+      return;
+    case "sheet":
+      applySheet();
+      say(`Sheet ${sheetOf(app.doc).name}: ${paperSelect.value} at 1:${scaleSelect.value}`);
       return;
     case "new":
       newDrawing();
@@ -608,7 +646,7 @@ function runCommand(text: string): void {
       say("Pick, or drag a window (drag left = crossing)");
       return;
     default:
-      say(`Unknown command "${word}" — type Help for the list`, true);
+      say(`Unknown command "${word}" ??type Help for the list`, true);
   }
 }
 
@@ -621,7 +659,7 @@ function startToolWithArgs(id: string, args: string): void {
   }
 }
 
-const HELP = "Commands: L PL REC C A T PO DLI DRA H LE SEC B I M CO RO SC MI O TR EX F J X AR E U Z P SAVE DXFOUT PLOT UNITS LAYER PAPER NEW HELP";
+const HELP = "Commands: L PL REC C A T PO DLI DRA H LE SEC B I M CO RO SC MI O TR EX F J X AR E U Z P SAVE DXFOUT PLOT PDF PREVIEW SHEET UNITS LAYER PAPER NEW HELP";
 
 /* ================================================================== ui */
 
@@ -709,7 +747,7 @@ function renderLayers(): void {
 
     const del = document.createElement("button");
     del.className = "tog";
-    del.textContent = "×";
+    del.textContent = "?";
     del.title = "Delete the layer (its entities move to layer 0)";
     del.addEventListener("click", () => {
       const err = layerCommands(app).remove(layer.id);
@@ -808,6 +846,78 @@ $("file-new").addEventListener("click", newDrawing);
 $("file-save").addEventListener("click", () => void saveProject(app).then((m) => say(m)));
 $("file-dxf-save").addEventListener("click", () => void saveDxf(app).then((m) => say(m)));
 $("file-svg").addEventListener("click", () => void plotDrawing(app).then((m) => say(m)));
+$("file-pdf").addEventListener("click", () => void exportPlot(app, "pdf").then((m) => say(m)));
+$("plot-preview").addEventListener("click", () => previewOpen());
+$("preview-close").addEventListener("click", closePreview);
+$("preview-export").addEventListener("click", () => void exportPlot(app, "pdf").then((m) => say(m)));
+
+/* ============================================================ layout */
+
+const previewEl = $("preview");
+const previewSheet = $("preview-sheet");
+const previewNote = $("preview-note");
+const paperSelect = $("sheet-paper") as HTMLSelectElement;
+const scaleSelect = $("sheet-scale") as HTMLSelectElement;
+const titleInput = $("sheet-title") as HTMLInputElement;
+const sheetNote = $("sheet-note");
+
+/** Push the document's sheet into the panel; called after every change. */
+function syncSheetPanel(): void {
+  const sheet = sheetOf(app.doc);
+  if (paperSelect.value !== (sheet.paper ?? "")) paperSelect.value = sheet.paper ?? "A3";
+  if (scaleSelect.value !== String(sheet.scale)) scaleSelect.value = String(sheet.scale);
+  if (document.activeElement !== titleInput) titleInput.value = sheet.title;
+  const info = sheetPlotInfo(app);
+  const note = info && info.fitted ? ` ??shrunk to 1:${formatScale(info.scale)} to fit` : "";
+  sheetNote.textContent = `${sheet.paper ?? "custom"} 繚 1:${formatScale(sheet.scale)}${note}`;
+  sheetNote.classList.toggle("bad", info?.fitted === true);
+}
+
+function applySheet(): void {
+  const r = app.edit(
+    setSheet({ paper: paperSelect.value, scale: Number(scaleSelect.value) || 50, title: titleInput.value || "Untitled drawing" }),
+  );
+  if (!r.ok) say("The sheet could not be changed", true);
+  syncSheetPanel();
+  redraw();
+}
+paperSelect.addEventListener("change", applySheet);
+scaleSelect.addEventListener("change", applySheet);
+titleInput.addEventListener("change", applySheet);
+paperSelect.dataset["commands"] = "sheet";
+scaleSelect.dataset["commands"] = "sheet";
+titleInput.dataset["commands"] = "sheet-title";
+
+/**
+ * The plot preview is the exported sheet, not a picture of the screen: it is
+ * the SVG the PDF and the SVG export are drawn from, scaled to fit the stage.
+ */
+function previewOpen(): boolean {
+  const svg = plotText(app, "svg");
+  if (!svg) {
+    say("Nothing to preview: the drawing is empty", true);
+    return false;
+  }
+  previewSheet.innerHTML = svg;
+  const info = sheetPlotInfo(app);
+  previewNote.textContent = info
+    ? `Preview 繚 ${formatScale(info.scale)}${info.fitted ? " (shrunk to fit)" : ""} 繚 ${info.width} x ${info.height} mm`
+    : "Preview";
+  previewEl.removeAttribute("hidden");
+  say("Preview: this is what Plot and PDF write");
+  previewEl.dataset["open"] = "1";
+  return true;
+}
+
+function closePreview(): void {
+  previewEl.setAttribute("hidden", "");
+  delete previewEl.dataset["open"];
+  previewSheet.innerHTML = "";
+  focusCommand();
+}
+previewEl.addEventListener("click", (e) => {
+  if (e.target === previewEl) closePreview();
+});
 $("file-open").addEventListener("click", () => pickFile(".dwgcad,application/json"));
 $("file-dxf-open").addEventListener("click", () => pickFile(".dxf,text/plain"));
 
@@ -938,7 +1048,7 @@ function resize(): void {
 new ResizeObserver(resize).observe(canvas.parentElement ?? canvas);
 
 canvas.dataset["schema"] = String(SCHEMA_VERSION);
-canvas.dataset["commands"] = [...Object.keys(registry), "undo", "redo", "zoom", "save", "dxfout", "plot", "new", "paper", "units", "layer", "help", "select"].join(",");
+canvas.dataset["commands"] = [...Object.keys(registry), "undo", "redo", "zoom", "save", "dxfout", "plot", "pdf", "preview", "sheet", "new", "paper", "units", "layer", "help", "select"].join(",");
 
 /** The testing surface: intent-level actions, no mouse events synthesised. */
 interface TestSurface {
@@ -966,6 +1076,15 @@ interface TestSurface {
   /** Open a dimension's value prompt and answer it, as a click then a type. */
   editDimension(dimId: string, text: string): string;
   glyphs(): { text: string; at: Pt; bad: boolean }[];
+  /** A-03: the sheet, its exports, and the preview that matches both. */
+  sheet(): Sheet;
+  sheetPlotInfo(scale?: number): { scale: number; fitted: boolean; width: number; height: number } | null;
+  setSheet(edit: SheetEdit): { ok: boolean };
+  pdfText(scale?: number): string;
+  exportPlot(format: PlotFormat, scale?: number): Promise<string>;
+  previewOpen(): boolean;
+  previewText(): string;
+  previewClose(): void;
 }
 declare global {
   interface Window {
@@ -1025,14 +1144,23 @@ window.draftcheckTest = {
   openText,
   saveProject: () => saveProject(app),
   projectText: async () => serializeProjectJson(app.doc),
-  plotText: (scale) => {
-    const opts = plotOptions(app, { size: "A4", scale });
-    return opts ? plotSvg(app.doc, opts) : "";
-  },
+  plotText: (scale) => plotText(app, "svg", scale),
   plot: async (scale) => {
-    const m = await plotDrawing(app, "plot.svg", { size: "A4", scale });
+    const m = await plotDrawing(app, "svg", scale);
     return m.startsWith("Plotted");
   },
+  sheetPlotInfo: (scale) => sheetPlotInfo(app, scale),
+  pdfText: (scale) => plotText(app, "pdf", scale),
+  setSheet: (edit) => app.edit(setSheet(edit)),
+  sheet: () => sheetOf(app.doc),
+  exportPlot: async (format, scale) => {
+    const m = await exportPlot(app, format, scale);
+    say(m);
+    return m;
+  },
+  previewOpen: () => previewOpen(),
+  previewText: () => previewEl?.querySelector("svg")?.outerHTML ?? "",
+  previewClose: () => closePreview(),
   hint: () => hintEl.textContent ?? "",
   pickAt: (x, y) => pickEntity(app.doc, pt(x, y), cam.mm(8))?.id ?? null,
 };
@@ -1045,6 +1173,6 @@ void document.fonts.ready.then(() => {
   cam.unit = Math.min(cam.unit, Math.min(cam.width, cam.height) / 300);
   syncPaperButton();
   renderLayers();
-  say("Ready — type Help for commands, or click a tool");
+  say("Ready ??type Help for commands, or click a tool");
   focusCommand();
 });

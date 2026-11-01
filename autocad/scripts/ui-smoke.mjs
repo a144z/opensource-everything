@@ -357,12 +357,107 @@ const plotProbe = `
 (() => {
   const t = window.draftcheckTest;
   if (!t) return { skipped: true };
+  t.command('new');
+  t.command('rect');
+  t.command('0,0');
+  t.command('400,300');
+  t.command('Escape');
   const svg = t.plotText(50);
   return {
     skipped: false,
     isSvg: svg.startsWith('<svg') || svg.includes('<svg'),
     hasPath: svg.includes('<path') || svg.includes('<line') || svg.includes('<polyline'),
     length: svg.length,
+  };
+})()`;
+
+/**
+ * A-03: sheets and plotting. A 1000 mm line on an A3 at 1:50 must be 20 mm of
+ * ink, the title block must say so, the preview must be the same drawing the
+ * export writes, and the export must not go through the download prompt.
+ */
+const sheetPlotProbe = `
+(async () => {
+  const t = window.draftcheckTest;
+  if (!t) return { skipped: true };
+  t.command('new');
+  t.command('line');
+  t.command('0,0');
+  t.command('1000,0');
+  t.command('Escape');
+
+  const set = t.setSheet({ paper: 'A3', scale: 50, title: 'Test sheet', notes: ['Drawn by the smoke'] });
+  const sheet = t.sheet();
+  const panelPaper = document.getElementById('sheet-paper').value;
+  const panelScale = document.getElementById('sheet-scale').value;
+  const panelTitle = document.getElementById('sheet-title').value;
+
+  // 1:50 exactness, measured in the exported SVG itself, not in the model.
+  const svg = t.plotText(50);
+  const svg2 = t.plotText(50);
+  const info = t.sheetPlotInfo(50);
+  const lines = [...svg.matchAll(/<line x1="([-\\d.]+)" y1="([-\\d.]+)" x2="([-\\d.]+)" y2="([-\\d.]+)"/g)];
+  let longest = 0;
+  for (const m of lines) {
+    const dx = Number(m[3]) - Number(m[1]);
+    const dy = Number(m[4]) - Number(m[2]);
+    longest = Math.max(longest, Math.hypot(dx, dy));
+  }
+  const has20mm = lines.some((m) => Math.abs(Math.hypot(Number(m[3]) - Number(m[1]), Number(m[4]) - Number(m[2])) - 20) < 0.01);
+  const texts = [...svg.matchAll(/<text[^>]*>([^<]*)<\\/text>/g)].map((m) => m[1]);
+
+  const pdf = t.pdfText(50);
+  const pdfOk = pdf.startsWith('%PDF-1.4') && pdf.trimEnd().endsWith('%%EOF') && pdf.includes('/MediaBox');
+
+  // Preview must be the export, character for character apart from the DOM.
+  const opened = t.previewOpen();
+  const preview = t.previewText();
+  t.previewClose();
+  // The browser re-serialises what it parsed; comparing the drawing content
+  // (lines and text, sorted) is the honest test that it is the same sheet.
+  // (The browser writes <line ...></line> where the exporter writes <line .../>, so
+  // normalise the closing syntax before comparing.)
+  const tidy = (x) => x.replace(/\\s+/g, ' ').trim().replace(/\\/?>$/, '').replace(/<\\/(line|text)>$/, '') + '>';
+  const shape = (s) => ({
+    lines: (s.match(/<line [^>]*>/g) || []).map(tidy).sort(),
+    texts: (s.match(/<text[^>]*>[^<]*<\\/text>/g) || []).map(tidy).sort(),
+  });
+  const ps = shape(preview);
+  const ss = shape(svg);
+  const sameShape = preview.length > 0 && ps.lines.join() === ss.lines.join() && ps.texts.join() === ss.texts.join();
+  const previewLen = preview.length;
+  const svgLen = svg.length;
+  const lineDiff = ps.lines.join() !== ss.lines.join();
+  const textDiff = ps.texts.join() !== ss.texts.join();
+
+  // Export without a prompt: showSaveFilePicker is the browser's save dialog.
+  let pickerCalled = false;
+  const realPicker = window.showSaveFilePicker;
+  window.showSaveFilePicker = async (opts) => {
+    pickerCalled = true;
+    return {
+      createWritable: async () => ({ write: async () => {}, close: async () => {} }),
+      name: (opts && opts.suggestedName) || '',
+    };
+  };
+  let exportMsg = '';
+  try {
+    exportMsg = await t.exportPlot('pdf', 50);
+  } finally {
+    window.showSaveFilePicker = realPicker;
+  }
+  let promptOk = false;
+  try {
+    promptOk = typeof window.showSaveFilePicker === 'function';
+  } catch (e) { promptOk = false; }
+  return {
+    skipped: false,
+    stable: svg === svg2,
+    notes: sheet.notes,
+    setOk: set.ok, sheet, panelPaper, panelScale, panelTitle,
+    has20mm, longest, info, texts, pdfOk, pdfLen: pdf.length,
+    opened, previewMatches: sameShape, previewLen, svgLen, lineDiff, textDiff, pvLines: ps.lines.length, svgLines: ss.lines.length,
+    pickerCalled, exportMsg, promptOk,
   };
 })()`;
 
@@ -414,7 +509,7 @@ try {
       const t = window.draftcheckTest;
       const buttons = new Set([...document.querySelectorAll('[data-cmd]')].map((b) => b.dataset.cmd));
       const names = (document.getElementById('viewport').dataset.commands ?? '').split(',').filter(Boolean);
-      const tools = names.filter((n) => !['undo','redo','zoom','save','dxfout','plot','new','paper','units','layer','help','select','dimaligned'].includes(n));
+      const tools = names.filter((n) => !['undo','redo','zoom','save','dxfout','plot','new','paper','units','layer','help','select','dimaligned','pdf','preview','sheet'].includes(n));
       return { tools, missing: tools.filter((n) => !buttons.has(n) || !t) };
     })()`,
   );
@@ -465,7 +560,7 @@ try {
     checks.push(["typing the value moves the geometry to it", Math.abs(edit.afterType - 600) < 0.5, edit.afterType]);
     checks.push(["the edit is one undo step", edit.undoWentBack && Math.abs(edit.afterRedo - 600) < 0.5, JSON.stringify(edit)]);
     checks.push(["an impossible value keeps the drawing and says why", edit.unchanged && edit.stillUnchanged && /greater than zero/i.test(edit.hint ?? ""), JSON.stringify(edit)]);
-    checks.push(["constraint glyphs sit next to driving dimensions", edit.glyphsBefore >= 1 && edit.glyphsAfter >= 1 && edit.glyphText.every((s) => /▣/.test(s)), JSON.stringify(edit.glyphText)]);
+    checks.push(["constraint glyphs sit next to driving dimensions", edit.glyphsBefore >= 1 && edit.glyphsAfter >= 1 && edit.glyphText.every((s) => /\d/.test(s) && /mm/.test(s)), JSON.stringify(edit.glyphText)]);
   }
 
   const layers = await evaluate(api, layerProbe);
@@ -479,15 +574,47 @@ try {
 
   const plot = await evaluate(api, plotProbe);
   checks.push(["plot produces an SVG", plot.isSvg && plot.hasPath, JSON.stringify(plot)]);
+  const sheetPlot = await evaluate(api, sheetPlotProbe);
+  if (sheetPlot.skipped) {
+    checks.push(["the sheet panel sets the sheet", false, "no test surface"]);
+  } else {
+    checks.push([
+      "the sheet panel sets paper, scale and title",
+      sheetPlot.setOk && sheetPlot.panelPaper === "A3" && sheetPlot.panelScale === "50" && sheetPlot.panelTitle === "Test sheet",
+      JSON.stringify({ paper: sheetPlot.panelPaper, scale: sheetPlot.panelScale, title: sheetPlot.panelTitle }),
+    ]);
+    checks.push([
+      "1000 mm at 1:50 plots as exactly 20 mm",
+      sheetPlot.has20mm && Math.abs(sheetPlot.info.scale - 50) < 1e-6 && sheetPlot.info.fitted === false,
+      JSON.stringify({ longest: sheetPlot.longest, info: sheetPlot.info }),
+    ]);
+    checks.push([
+      "the chosen scale and sheet size appear in the title block",
+      sheetPlot.texts.includes("SCALE 1:50") && sheetPlot.texts.some((x) => /A3 420 x 297 mm/.test(x)) && sheetPlot.texts.includes("Test sheet") && sheetPlot.texts.includes("Drawn by the smoke"),
+      JSON.stringify(sheetPlot.texts),
+    ]);
+    checks.push(["plot preview matches the exported file", sheetPlot.opened && sheetPlot.previewMatches, JSON.stringify({ opened: sheetPlot.opened, match: sheetPlot.previewMatches, lineDiff: sheetPlot.lineDiff, textDiff: sheetPlot.textDiff, pvLines: sheetPlot.pvLines, svgLines: sheetPlot.svgLines })]);
+    checks.push(["PDF export is a real PDF", sheetPlot.pdfOk, sheetPlot.pdfLen]);
+    checks.push([
+      "export goes through the save dialog, not the download prompt",
+      sheetPlot.pickerCalled && /Exported/.test(sheetPlot.exportMsg),
+      JSON.stringify({ picker: sheetPlot.pickerCalled, msg: sheetPlot.exportMsg }),
+    ]);
+  }
 
   // The command line is a control a user types into; drive it as one.
   const typed = await evaluate(
     api,
     `(() => {
       const t = window.draftcheckTest;
-      t.command('new');
+      // A known start: no tool running, an empty drawing.
       const input = document.getElementById('command-input');
       input.focus();
+      input.value = '';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const preview = document.getElementById('preview');
+      if (preview && !preview.hidden) document.getElementById('preview-close').click();
+      t.command('new');
       input.value = 'l';
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       const started = t.runner.prompt !== null;

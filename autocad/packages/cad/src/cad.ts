@@ -1,4 +1,4 @@
-﻿/**
+/**
  * DraftCheck CAD engine - one file on purpose.
  *
  * F-01 rule (user, 2026-11-01): every feature goes into this file until the
@@ -522,10 +522,24 @@ export interface Sheet {
   /** Paper size in mm. */
   readonly width: number;
   readonly height: number;
-  /** Plot scale denominator: 50 means 1:50. */
+  /**
+   * The nominal plot scale denominator the title block states (50 = 1:50).
+   * The plot honours it exactly unless the drawing is larger than the sheet,
+   * in which case it fits and the title block prints the real ratio.
+   */
   readonly scale: number;
   readonly title: string;
   readonly border: boolean;
+  /** Paper name from `PAPER_SIZES`, or a custom sheet with only width/height. */
+  readonly paper?: string;
+  /** Border and frame offset in mm, measured in from the paper edge. */
+  readonly margin?: number;
+  /** Title block origin and size in paper mm, from the sheet's bottom-left. */
+  readonly titleBlock?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Extra lines drawn under the title, top of the block first. */
+  readonly notes?: readonly string[];
+  /** Model point to centre the view on; omitted means the drawing bounds centre. */
+  readonly center?: Pt;
 }
 
 export interface DocumentState {
@@ -864,6 +878,24 @@ export class CadSession {
       if (m) max = Math.max(max, Number(m[1]));
     }
     this.#idSeq = max;
+  }
+
+  /**
+   * Open a saved project: parse, check the schema, and hand the doc back in a
+   * session with an empty history. Returns null for text that is not a project
+   * at all, so the caller reports "not a drawing" rather than throwing at the
+   * user from inside a promise.
+   */
+  static load(text: string, idPrefix = "e"): CadSession | null {
+    let doc: DocumentState;
+    try {
+      doc = deserializeProjectText(text);
+    } catch {
+      return null;
+    }
+    const session = new CadSession(doc, idPrefix);
+    session.load(doc, idPrefix);
+    return session;
   }
 }
 
@@ -4412,84 +4444,368 @@ export function textWidth(value: string, height: number): number {
 /* ===================================================== plotting */
 
 export interface PlotOptions {
-  /** Millimetres per model unit on paper: 0.02 means 1:50. */
+  /** Millimetres of paper per model millimetre: 0.02 means 1:50. */
   readonly scale: number;
   readonly paper: { readonly width: number; readonly height: number };
-  /** Model extent to fit: the drawing's bounds. */
+  /** Model extent to plot. */
   readonly window: Bounds;
   /** Rotation in quarter turns. */
   readonly rotate?: 0 | 1 | 2 | 3;
+  /** Paper margin in mm; the frame and title block sit inside it. */
   readonly margin?: number;
+  /** Draw the border frame. */
+  readonly border?: boolean;
+  /** Lines of title block text, bottom-up from the sheet's bottom-left. */
+  readonly title?: readonly string[];
+  /** Lay the drawing out as an engineering sheet rather than a loose window. */
+  readonly sheet?: Sheet;
+}
+
+export interface PlotLayout {
+  /** paper = (a*x + -c*y + e, c*x + a*y + f), in paper mm, y up. */
+  readonly a: number;
+  readonly c: number;
+  readonly e: number;
+  readonly f: number;
+  /** The scale actually used: 1:actual means one model unit is `1/actual` mm of paper. */
+  readonly actual: number;
+  /** True when the nominal scale did not fit and the plot was shrunk to fit. */
+  readonly fitted: boolean;
+  readonly paper: { readonly width: number; readonly height: number };
 }
 
 /**
- * Where model space maps on paper. The plot pipeline (F-30) uses exactly this
- * mapping for SVG and PDF, so what is previewed is what is plotted.
+ * Where model space maps on paper.
+ *
+ * The nominal scale is honoured exactly whenever the drawing fits at it - a
+ * 1:50 plot of a 1000 mm line is 20 mm of ink, not "as big as it would go".
+ * Only when the drawing is bigger than the sheet does the plot shrink, and
+ * then it says so (`actual`, `fitted`) so the title block can print the real
+ * ratio instead of a lie.
  */
-export function plotTransform(options: PlotOptions): { readonly a: number; readonly c: number; readonly e: number; readonly f: number; readonly tl: Pt } {
-  const margin = options.margin ?? 10;
-  const pw = (options.paper.width - margin * 2);
-  const ph = (options.paper.height - margin * 2);
-  const ww = (options.window.max.x - options.window.min.x) * options.scale;
-  const wh = (options.window.max.y - options.window.min.y) * options.scale;
-  const fit = Math.min(pw / Math.max(ww, 1e-6), ph / Math.max(wh, 1e-6), 1);
-  const s = options.scale * fit;
+export function plotLayout(options: PlotOptions): PlotLayout {
+  const sheet = options.sheet;
+  const margin = options.margin ?? sheet?.margin ?? 10;
+  const titleH = sheet && sheet.titleBlock ? sheet.titleBlock.height + 4 : 0;
+  const pw = Math.max(1, options.paper.width - margin * 2);
+  const ph = Math.max(1, options.paper.height - margin * 2 - titleH);
+  const ww = Math.max(1e-6, options.window.max.x - options.window.min.x) * options.scale;
+  const wh = Math.max(1e-6, options.window.max.y - options.window.min.y) * options.scale;
+  const room = Math.min(pw / ww, ph / wh);
+  const fitted = room < 1;
+  const s = fitted ? options.scale * room : options.scale;
   const turn = ((options.rotate ?? 0) % 4) * (Math.PI / 2);
   const cos = Math.round(Math.cos(turn));
   const sin = Math.round(Math.sin(turn));
-  // A = centre of the drawing box in paper mm.
   const cx = options.paper.width / 2;
-  const cy = options.paper.height / 2;
+  const cy = margin + ph / 2;
   const mx = (options.window.min.x + options.window.max.x) / 2;
   const my = (options.window.min.y + options.window.max.y) / 2;
-  // paper = R * s * (model - m) + c
-  return { a: s * cos, c: s * sin, e: cx - s * (cos * mx - sin * my), f: cy - s * (sin * mx + cos * my), tl: pt(margin, margin) };
+  return {
+    a: s * cos,
+    c: s * sin,
+    e: cx - s * (cos * mx - sin * my),
+    f: cy - s * (sin * mx + cos * my),
+    actual: s > 0 ? 1 / s : 1,
+    fitted,
+    paper: options.paper,
+  };
 }
 
+/** Model point to paper millimetres (y up from the bottom-left corner). */
 export function toPaper(t: { readonly a: number; readonly c: number; readonly e: number; readonly f: number }, p: Pt): Pt {
-  const b = -t.c;
-  const d = t.a;
-  return pt(t.a * p.x + b * p.y + t.e, t.c * p.x + d * p.y + t.f);
+  return pt(t.a * p.x - t.c * p.y + t.e, t.c * p.x + t.a * p.y + t.f);
 }
 
-/** SVG path data for every visible entity, in paper mm. */
-export function plotSvg(doc: DocumentState, options: PlotOptions): string {
-  const t = plotTransform(options);
-  const paths: string[] = [];
-  const fmt = (n: number): string => (Math.round(n * 1000) / 1000).toString();
+/** Paper millimetres down to model space, the inverse of `toPaper`. */
+export function fromPaper(t: { readonly a: number; readonly c: number; readonly e: number; readonly f: number }, p: Pt): Pt {
+  const x = p.x - t.e;
+  const y = p.y - t.f;
+  const det = t.a * t.a + t.c * t.c;
+  return pt((t.a * x + t.c * y) / det, (-t.c * x + t.a * y) / det);
+}
+
+/** Kept for the first plot call sites: the old name, same transform. */
+export function plotTransform(options: PlotOptions): PlotLayout {
+  return plotLayout(options);
+}
+
+interface PaperLine {
+  readonly a: Pt;
+  readonly b: Pt;
+  readonly color: string;
+  readonly width: number;
+  readonly dash: readonly number[];
+}
+
+interface PaperText {
+  readonly at: Pt;
+  readonly text: string;
+  readonly height: number;
+  readonly rotation: number;
+  readonly color: string;
+  readonly anchor: "start" | "middle" | "end";
+}
+
+/**
+ * Flatten the drawing onto paper: every entity becomes lines, every piece of
+ * text becomes text. SVG and PDF are both rendered from this list, so the two
+ * exports cannot disagree with each other or with the preview.
+ */
+export function plotPage(
+  doc: DocumentState,
+  options: PlotOptions,
+): { readonly layout: PlotLayout; readonly lines: PaperLine[]; readonly texts: PaperText[] } {
+  const layout = plotLayout(options);
+  const lines: PaperLine[] = [];
+  const texts: PaperText[] = [];
+  const ink = "#000000";
+  const pxPerMm = layout.a > 0 ? 1 / layout.a : 1;
   for (const id of doc.order) {
     const e = doc.entities.get(id);
     if (!e || !entityVisible(doc, e) || e.block) continue;
     const layer = doc.layers.get(e.layer);
-    const color = colorToHex(resolveColor(e, doc.layers));
-    const weight = e.lineweight ?? layer?.lineweight ?? 0.25;
-    const dash = linetypePattern(resolveLinetype(e, doc.layers), doc.ltscale / Math.max(1, t.a));
-    for (const seg of candidates(e)) {
-      const a = toPaper(t, seg.a);
-      const b = toPaper(t, seg.b);
-      paths.push(`<line x1="${fmt(a.x)}" y1="${fmt(options.paper.height - a.y)}" x2="${fmt(b.x)}" y2="${fmt(options.paper.height - b.y)}" stroke="${color}" stroke-width="${weight}"${dash.length ? ` stroke-dasharray="${dash.map(fmt).join(" ")}"` : ""}/>`);
-    }
+    const shade = resolveColor(e, doc.layers);
+    // Plot in black by default: a printout of a CAD sheet is line work, not a
+    // screenshot, and a light yellow layer would otherwise vanish on paper.
+    const color = options.sheet ? ink : colorToHex(shade);
+    const weight = Math.max(0.13, e.lineweight ?? layer?.lineweight ?? 0.25);
+    const ltype = resolveLinetype(e, doc.layers);
+    const dash = linetypePattern(ltype, doc.ltscale * pxPerMm);
+    for (const seg of candidates(e)) lines.push({ a: toPaper(layout, seg.a), b: toPaper(layout, seg.b), color, width: weight, dash });
     if (e.kind === "text") {
-      const at = toPaper(t, e.at);
-      paths.push(`<text x="${fmt(at.x)}" y="${fmt(options.paper.height - at.y)}" font-size="${fmt(e.height * t.a)}" fill="${color}" transform="rotate(${fmt((-e.rotation * 180) / Math.PI)} ${fmt(at.x)} ${fmt(options.paper.height - at.y)})">${escapeXml(e.value)}</text>`);
+      texts.push({
+        at: toPaper(layout, e.at),
+        text: e.value,
+        height: Math.max(1.5, e.height * layout.a),
+        rotation: e.rotation,
+        color,
+        anchor: e.align === "center" ? "middle" : e.align === "right" ? "end" : "start",
+      });
+    }
+    if (e.kind === "dimension") {
+      const g = dimensionGeometry(e);
+      for (const seg of g.lines) lines.push({ a: toPaper(layout, seg.a), b: toPaper(layout, seg.b), color, width: weight, dash });
+      const value = measureDimension(doc, e);
+      texts.push({
+        at: toPaper(layout, g.textAt),
+        text: e.textOverride !== "" ? e.textOverride : value.label,
+        height: Math.max(1.5, e.textHeight * layout.a),
+        rotation: g.textRotation,
+        color,
+        anchor: "middle",
+      });
     }
     if (e.kind === "hatch") {
-      const ring = e.rings[0];
-      if (ring && ring.length > 2) {
-        const d = ring.map((p, i) => `${i === 0 ? "M" : "L"}${fmt(toPaper(t, p).x)} ${fmt(options.paper.height - toPaper(t, p).y)}`).join(" ") + " Z";
-        paths.push(`<path d="${d}" fill="${e.solid ? color : "none"}" fill-opacity="${e.solid ? 0.12 : 0}" stroke="${color}" stroke-width="${weight}"/>`);
+      for (const ring of e.rings) {
+        for (let i = 0; i < ring.length; i++) {
+          const a = toPaper(layout, ring[i]!);
+          const b = toPaper(layout, ring[(i + 1) % ring.length]!);
+          lines.push({ a, b, color, width: weight, dash });
+        }
       }
     }
   }
-  const head = `<svg xmlns="http://www.w3.org/2000/svg" width="${options.paper.width}mm" height="${options.paper.height}mm" viewBox="0 0 ${options.paper.width} ${options.paper.height}">`;
-  return `${head}<g>${paths.join("")}</g></svg>`;
+  if (options.sheet) {
+    const s = options.sheet;
+    const frame = paperSheet(s, layout, doc);
+    lines.push(...frame.lines);
+    texts.push(...frame.texts);
+  }
+  return { layout, lines, texts };
+}
+
+/**
+ * The sheet furniture: border frame and title block. Everything is in paper
+ * millimetres, so it plots the same size on A4 and A0, and the scale line in
+ * the title block is the *actual* plot ratio.
+ */
+export function paperSheet(sheet: Sheet, layout: PlotLayout, doc: DocumentState): { lines: PaperLine[]; texts: PaperText[] } {
+  const lines: PaperLine[] = [];
+  const texts: PaperText[] = [];
+  const ink = "#000000";
+  const m = sheet.margin ?? 10;
+  const W = sheet.width;
+  const H = sheet.height;
+  if (sheet.border) {
+    const rect = (x0: number, y0: number, x1: number, y1: number, w: number): void => {
+      lines.push({ a: pt(x0, y0), b: pt(x1, y0), color: ink, width: w, dash: [] });
+      lines.push({ a: pt(x1, y0), b: pt(x1, y1), color: ink, width: w, dash: [] });
+      lines.push({ a: pt(x1, y1), b: pt(x0, y1), color: ink, width: w, dash: [] });
+      lines.push({ a: pt(x0, y1), b: pt(x0, y0), color: ink, width: w, dash: [] });
+    };
+    rect(m, m, W - m, H - m, 0.7);
+    rect(m + 3, m + 3, W - m - 3, H - m - 3, 0.25);
+  }
+  const tb = sheet.titleBlock;
+  if (!tb) return { lines, texts };
+  const x0 = tb.x;
+  const y0 = tb.y;
+  const x1 = tb.x + tb.width;
+  const y1 = tb.y + tb.height;
+  lines.push({ a: pt(x0, y0), b: pt(x1, y0), color: ink, width: 0.5, dash: [] });
+  lines.push({ a: pt(x1, y0), b: pt(x1, y1), color: ink, width: 0.5, dash: [] });
+  lines.push({ a: pt(x1, y1), b: pt(x0, y1), color: ink, width: 0.5, dash: [] });
+  lines.push({ a: pt(x0, y1), b: pt(x0, y0), color: ink, width: 0.5, dash: [] });
+  const ratio = formatScale(layout.actual);
+  const rows: { text: string; height: number }[] = [
+    { text: sheet.title || "Untitled drawing", height: 5 },
+    { text: `${sheet.paper ?? "custom"} ${sheet.width} x ${sheet.height} mm`, height: 2.8 },
+    { text: `SCALE 1:${ratio}${layout.fitted ? " (fit)" : ""}`, height: 3.5 },
+    { text: sheet.name + (doc.units !== "mm" ? `  ·  units ${doc.units}` : ""), height: 2.8 },
+    ...(sheet.notes ?? []).map((n) => ({ text: n, height: 2.6 })),
+  ];
+  // Rows from the top of the block down, each with a rule above it. A block
+  // too short for every row elides the notes rather than overflowing the frame
+  // (the title, sheet size and scale always fit first).
+  let y = y1 - 2;
+  for (const row of rows) {
+    const h = row.height + 2.4;
+    if (y - h < y0) {
+      texts.push({ at: pt(x0 + 3, y0 + 2), text: "…", height: 2.6, rotation: 0, color: ink, anchor: "start" });
+      break;
+    }
+    y -= h;
+    texts.push({ at: pt(x0 + 3, y + 1.6), text: row.text, height: row.height, rotation: 0, color: ink, anchor: "start" });
+    if (y > y0 + 0.01) lines.push({ a: pt(x0, y), b: pt(x1, y), color: ink, width: 0.18, dash: [] });
+  }
+  return { lines, texts };
+}
+
+const fmtMm = (n: number): string => {
+  const r = Math.round(n * 1000) / 1000;
+  return (Object.is(r, -0) ? 0 : r).toString();
+};
+
+function dashAttr(dash: readonly number[]): string {
+  return dash.length ? ` stroke-dasharray="${dash.map(fmtMm).join(" ")}"` : "";
+}
+
+/** SVG path data for every visible entity, in paper mm, plus the sheet furniture. */
+export function plotSvg(doc: DocumentState, options: PlotOptions): string {
+  const page = plotPage(doc, options);
+  const H = options.paper.height;
+  const parts: string[] = [];
+  for (const l of page.lines) {
+    parts.push(`<line x1="${fmtMm(l.a.x)}" y1="${fmtMm(H - l.a.y)}" x2="${fmtMm(l.b.x)}" y2="${fmtMm(H - l.b.y)}" stroke="${l.color}" stroke-width="${fmtMm(l.width)}"${dashAttr(l.dash)}/>`);
+  }
+  for (const t of page.texts) {
+    const x = fmtMm(t.at.x);
+    const y = fmtMm(H - t.at.y);
+    const rot = Math.round((-t.rotation * 180) / Math.PI * 100) / 100;
+    const transform = rot ? ` transform="rotate(${rot} ${x} ${y})"` : "";
+    const anchor = t.anchor === "middle" ? ` text-anchor="middle"` : t.anchor === "end" ? ` text-anchor="end"` : "";
+    parts.push(`<text x="${x}" y="${y}" font-family="Arial, Helvetica, sans-serif" font-size="${fmtMm(t.height)}" fill="${t.color}"${anchor}${transform}>${escapeXml(t.text)}</text>`);
+  }
+  const W = options.paper.width;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${fmtMm(W)}mm" height="${fmtMm(H)}mm" viewBox="0 0 ${fmtMm(W)} ${fmtMm(H)}"><rect width="${fmtMm(W)}" height="${fmtMm(H)}" fill="#ffffff"/><g>${parts.join("")}</g></svg>`;
+}
+
+/**
+ * A one page PDF, written by hand.
+ *
+ * No library, no canvas, and the same `plotPage` list as the SVG: strokes go
+ * through a line-width-aware stroker (PDF strokes with butt ends and no miter
+ * control, which would leave a 90-degree corner of a border with a notch), and
+ * text uses the 14 standard Helvetica face every reader has.
+ */
+export function plotPdf(doc: DocumentState, options: PlotOptions): string {
+  const page = plotPage(doc, options);
+  const toPt = 72 / 25.4;
+  const W = options.paper.width * toPt;
+  const H = options.paper.height * toPt;
+  const ops: string[] = [];
+  // White page.
+  ops.push("1 1 1 rg", `0 0 ${num(W)} ${num(H)} re`, "f");
+  const colors = new Map<string, string>();
+  const setStroke = (hex: string): string => {
+    let c = colors.get(hex);
+    if (!c) {
+      const n = Number.parseInt(hex.replace(/^#/, "") || "000000", 16);
+      c = `${num(((n >> 16) & 255) / 255)} ${num(((n >> 8) & 255) / 255)} ${num((n & 255) / 255)}`;
+      colors.set(hex, c);
+    }
+    return `${c} RG`;
+  };
+  const setFill = (hex: string): string => setStroke(hex).replace("RG", "rg") + " RG";
+  for (const l of page.lines) {
+    const x1 = num(l.a.x * toPt);
+    const y1 = num(l.a.y * toPt);
+    const x2 = num(l.b.x * toPt);
+    const y2 = num(l.b.y * toPt);
+    const w = Math.max(0.25, l.width * toPt);
+    const dash = l.dash.length ? `[${l.dash.map((d) => num(d * toPt)).join(" ")}] 0 d\n` : "[] 0 d\n";
+    if (l.dash.length) {
+      // A dashed stroke is drawn as its own runs: PDF dash arrays measure from
+      // the path start, and each segment here starts fresh, which is correct.
+      ops.push(`${setStroke(l.color)} ${dash}${num(w)} w 0 J 0 j`);
+      ops.push(`${x1} ${y1} m ${x2} ${y2} l S`);
+      continue;
+    }
+    ops.push(`${setStroke(l.color)} ${num(w)} w 1 J 1 j`);
+    ops.push(`${x1} ${y1} m ${x2} ${y2} l S`);
+  }
+  for (const t of page.texts) {
+    const size = Math.max(1, t.height * toPt);
+    const at = pdfText(t.at.x * toPt, t.at.y * toPt, t.rotation, t.anchor, t.text, size);
+    ops.push(`${setFill(t.color)} BT ${at} ET`);
+  }
+  const stream = ops.join("\n");
+  const objects: string[] = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(W)} ${num(H)}] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+  ];
+  let out = "%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n";
+  const offsets: number[] = [];
+  for (let i = 0; i < objects.length; i++) {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+  }
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return out;
+}
+
+function num(n: number): string {
+  const r = Math.round(n * 10000) / 10000;
+  return (Object.is(r, -0) ? 0 : r).toString();
+}
+
+function pdfText(x: number, y: number, rotation: number, anchor: "start" | "middle" | "end", text: string, size: number): string {
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  // Horizontal offset for the alignment, in text space then rotated in place.
+  const shift = anchor === "middle" ? -textWidth(text, size) / 2 : anchor === "end" ? -textWidth(text, size) : 0;
+  const dx = cos * shift;
+  const dy = sin * shift;
+  // A vertical origin at the text baseline: Helvetica sits on y, and the caller
+  // places the line by its baseline, which is what `textAt` means.
+  return `${num(cos)} ${num(sin)} ${num(-sin)} ${num(cos)} ${num(x + dx)} ${num(y + dy)} Tm /F1 ${num(size)} Tf (${escapePdf(text)}) Tj`;
 }
 
 function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+function escapePdf(s: string): string {
+  // WinAnsi: everything outside Latin-1 becomes '?', which is honest about what
+  // a standard 14-pt font can print without embedding a font file.
+  let out = "";
+  for (const ch of s) {
+    const code = ch.codePointAt(0) ?? 63;
+    const c = code >= 32 && code <= 255 && code !== 92 && code !== 40 && code !== 41 ? ch : code === 92 || code === 40 || code === 41 ? `\\${ch}` : code >= 256 ? "?" : ch;
+    out += c;
+  }
+  return out;
+}
+
 /* ====================================================== misc */
+
 
 /** The drawing's extent over visible entities, for fit-zoom and plot windows. */
 export function drawingBounds(doc: DocumentState): Bounds | null {
@@ -4520,6 +4836,76 @@ export const PAPER_SIZES: Readonly<Record<string, { width: number; height: numbe
   A0: { width: 1189, height: 841 },
   Letter: { width: 279.4, height: 215.9 },
 };
+
+/* ==================================================== layouts */
+
+/**
+ * The sheet a drawing starts with. A layout is a record, so making one is
+ * `setSheet`; nothing about paper space is special-cased in the entity model.
+ */
+export const DEFAULT_SHEET: Sheet = {
+  id: "sheet1",
+  name: "Layout 1",
+  paper: "A3",
+  width: 420,
+  height: 297,
+  scale: 50,
+  title: "Untitled drawing",
+  border: true,
+  margin: 20,
+  // Tall enough for the title, size, scale, layout name and two note lines.
+  titleBlock: { x: 20, y: 20, width: 160, height: 46 },
+  notes: [],
+};
+
+/** A sheet with every field filled in, from whatever the document holds. */
+export function sheetOf(doc: DocumentState, index = 0): Sheet {
+  const s = doc.sheets[index];
+  return s ? { ...DEFAULT_SHEET, ...s } : DEFAULT_SHEET;
+}
+
+export type SheetEdit = Partial<Pick<Sheet, "name" | "paper" | "scale" | "title" | "border" | "margin" | "titleBlock" | "notes" | "center">>;
+
+/**
+ * Patch a sheet in one undoable step. Setting `paper` resizes to that table
+ * entry; every other field is copied, so swapping A3 for A1 keeps the title,
+ * notes and scale, which is what makes it a single sane action.
+ */
+export function setSheet(edit: SheetEdit, index = 0): Command {
+  const what = [edit.name, edit.paper, edit.scale !== undefined ? "1:" + edit.scale : undefined]
+    .filter((s): s is string => s !== undefined && s !== "")
+    .join(" ");
+  return {
+    kind: "setSheet",
+    label: what ? "Sheet " + what : "Sheet settings",
+    apply(doc) {
+      const current = sheetOf(doc, index);
+      const table = edit.paper ? PAPER_SIZES[edit.paper] : undefined;
+      const next: Sheet = {
+        ...current,
+        width: table?.width ?? current.width,
+        height: table?.height ?? current.height,
+        ...(edit.name !== undefined ? { name: edit.name } : {}),
+        ...(edit.paper !== undefined ? { paper: edit.paper } : {}),
+        ...(edit.scale !== undefined ? { scale: Math.max(0.01, edit.scale) } : {}),
+        ...(edit.title !== undefined ? { title: edit.title } : {}),
+        ...(edit.border !== undefined ? { border: edit.border } : {}),
+        ...(edit.margin !== undefined ? { margin: edit.margin } : {}),
+        ...(edit.titleBlock !== undefined ? { titleBlock: edit.titleBlock } : {}),
+        ...(edit.notes !== undefined ? { notes: edit.notes } : {}),
+        ...(edit.center !== undefined ? { center: edit.center } : {}),
+      };
+      const sheets = doc.sheets.length ? doc.sheets.map((s, i) => (i === index ? next : s)) : [next];
+      return patchOf(new Map(), new Map(), "Sheet " + next.name, { sheets: doc.sheets }, { sheets });
+    },
+  };
+}
+
+/** A scale as people write it: 50, 12.5 - never a long float. */
+export function formatScale(ratio: number): string {
+  if (!Number.isFinite(ratio) || ratio <= 0) return "1";
+  return String(Math.round(ratio * 100) / 100);
+}
 
 export function setPaperMode(paper: boolean): Command {
   return editCommand(

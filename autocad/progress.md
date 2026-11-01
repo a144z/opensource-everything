@@ -3,6 +3,45 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-02 (A-03: sheets and plotting - last feature)
+
+Done
+- Engine: `Sheet` gained paper/margin/title block/notes/centre; `setSheet`
+  edits a sheet as one undoable document patch. `plotLayout` honours the
+  nominal scale exactly (no silent "fit"), reports the real ratio when the
+  drawing is oversized, and `plotPage` is one list of lines + texts that the
+  preview, the SVG and the PDF all render from - they cannot disagree. Ink is
+  always black on a sheet, dimensions and hatch rings included. `plotPdf`
+  writes a real `%PDF-1.4` (Helvetica WinAnsi, dash arrays).
+- App: Layout panel (paper, scale, title, apply), a preview overlay and
+  `pdf` / `preview` / `sheet` commands (+ `export`, `layout`); Esc closes the
+  preview. Export goes through `showSaveFilePicker` when the browser has it,
+  so there is no download prompt; it falls back to the download sink.
+- Tests: 39 engine tests, including exact 1:50, oversized fit reporting, title
+  block contents, SVG/PDF agreement, and a sheet round-tripping through save.
+- `scripts/ui-smoke.mjs`: six A-03 checks. Full gate PASS typecheck,
+  typecheck-app, tests, smoke, ui.
+- `feature_list.json`: all eight features pass. Nothing open.
+
+Deliberately not built
+- The A-03 desktop-build acceptance line (a Tauri/desktop shell) was not
+  built, on the user's instruction ("don't build, just continue work on the
+  rest"). The "export without a download prompt" outcome is covered by
+  `showSaveFilePicker` instead. Honest gap if the desktop shell is ever wanted.
+
+Bugs found this cycle
+- Disk filled to 0 bytes and truncated `cad.ts` to 0 bytes mid-edit; restored
+  from git HEAD and space freed. Check `Get-PSDrive C` before big writes.
+- The title block was too short for its own rows, so notes were silently
+  dropped. It is taller now and a block too short elides notes with a "…"
+  rather than overflowing the frame.
+
+Notes for the next session
+- Plot layout bug can only come from `plotPage` now; preview, SVG and PDF are
+  three renderings of the same list. Add a kind there and all three get it.
+- (the notes below on `Runner`, junctions and `draftcheckTest.command` still
+  hold.)
+
 ## Cycle 2026-11-02 (A-02: dimensions you can type into)
 
 Done

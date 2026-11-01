@@ -88,11 +88,43 @@
             <button id="file-dxf-open" title="Open a DXF file">Open DXF</button>
             <button id="file-dxf-save" title="Save as DXF">Save DXF</button>
             <button id="file-svg" title="Plot the drawing to SVG">Plot SVG</button>
+            <button id="file-pdf" data-cmd="pdf" title="Export the sheet as PDF">PDF</button>
           </div>
           <div class="row">
+            <button id="plot-preview" data-cmd="preview" title="Preview the sheet before plotting">Preview</button>
             <button id="zoom-extents" title="Zoom extents (Z)">Zoom extents</button>
             <button id="paper-mode" title="Model space / paper space">Model</button>
           </div>
+        </section>
+
+        <section id="layout-panel">
+          <h2>Layout</h2>
+          <div class="row">
+            <select id="sheet-paper" title="Paper size" aria-label="Paper size">
+              <option value="A4">A4</option>
+              <option value="A3" selected>A3</option>
+              <option value="A2">A2</option>
+              <option value="A1">A1</option>
+              <option value="A0">A0</option>
+              <option value="Letter">Letter</option>
+            </select>
+            <select id="sheet-scale" title="Plot scale" aria-label="Plot scale">
+              <option value="1">1:1</option>
+              <option value="2">1:2</option>
+              <option value="5">1:5</option>
+              <option value="10">1:10</option>
+              <option value="20">1:20</option>
+              <option value="50" selected>1:50</option>
+              <option value="100">1:100</option>
+              <option value="200">1:200</option>
+              <option value="500">1:500</option>
+            </select>
+          </div>
+          <div class="row">
+            <input id="sheet-title" type="text" placeholder="Title block name" value="Untitled drawing" autocomplete="off" spellcheck="false" />
+            <button id="sheet-apply" data-cmd="sheet" title="Apply the sheet settings (paper, scale, title)">Apply</button>
+          </div>
+          <p id="sheet-note" class="note">A3 · 1:50</p>
         </section>
       </aside>
 
@@ -101,6 +133,14 @@
         <div id="hint" aria-live="polite">Ready</div>
         <div id="cursor" class="cursor">0, 0</div>
         <div id="status"></div>
+        <div id="preview" hidden aria-label="Plot preview">
+          <div class="preview-bar">
+            <span id="preview-note">Plot preview</span>
+            <button id="preview-export" title="Export this sheet as PDF">Export PDF</button>
+            <button id="preview-close" title="Close the preview (Esc)">Close</button>
+          </div>
+          <div id="preview-sheet" class="preview-sheet"></div>
+        </div>
       </main>
 
       <footer id="prompt">

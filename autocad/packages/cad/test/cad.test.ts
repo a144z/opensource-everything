@@ -392,6 +392,65 @@ describe("fit and plot", () => {
     const svg = C.plotSvg(s.doc, { scale: 1 / 50, paper: C.PAPER_SIZES.A4!, window: { min: p(0, -100), max: p(1000, 100) } });
     expect(svg).toContain('width="297mm"');
   });
+
+  it("honours the nominal scale instead of growing the drawing to fill the sheet", () => {
+    // 1000 mm at 1:50 is 20 mm; an almost empty A3 could hold it ten times
+    // over, and a plot that did that would print the wrong scale.
+    const layout = C.plotLayout({ scale: 1 / 50, paper: C.PAPER_SIZES.A3!, window: { min: p(0, 0), max: p(1000, 600) } });
+    const a = C.toPaper(layout, p(0, 0));
+    const b = C.toPaper(layout, p(1000, 0));
+    expect(C.dist(a, b)).toBeCloseTo(20, 9);
+    expect(layout.actual).toBeCloseTo(50, 9);
+    expect(layout.fitted).toBe(false);
+  });
+
+  it("shrinks to fit an oversized drawing and says so", () => {
+    // 100 m wide at 1:50 needs 2 m of paper: fit it, and report a real ratio.
+    const layout = C.plotLayout({ scale: 1 / 50, paper: C.PAPER_SIZES.A4!, window: { min: p(0, 0), max: p(100000, 5000) } });
+    expect(layout.fitted).toBe(true);
+    expect(layout.actual).toBeGreaterThan(50);
+    const a = C.toPaper(layout, p(0, 0));
+    const b = C.toPaper(layout, p(100000, 0));
+    expect(C.dist(a, b)).toBeLessThanOrEqual(C.PAPER_SIZES.A4!.width - 2 * 10 + 1e-6);
+  });
+
+  it("prints the chosen scale and sheet size in the title block", () => {
+    const s = session();
+    s.run(C.addLine(p(0, 0), p(1000, 0)));
+    const sheet: C.Sheet = { ...C.DEFAULT_SHEET, paper: "A4", width: 297, height: 210, scale: 50, title: "Bracket" };
+    const page = C.plotPage(s.doc, { scale: 1 / 50, paper: C.PAPER_SIZES.A4!, window: { min: p(0, -100), max: p(1000, 100) }, sheet });
+    const said = page.texts.map((t) => t.text).join(" | ");
+    expect(said).toContain("Bracket");
+    expect(said).toContain("A4 297 x 210 mm");
+    expect(said).toContain("SCALE 1:50");
+  });
+
+  it("draws the same sheet in SVG and PDF", () => {
+    const s = session();
+    s.run(C.addLine(p(0, 0), p(1000, 0)));
+    const opts: C.PlotOptions = { scale: 1 / 50, paper: C.PAPER_SIZES.A4!, window: { min: p(0, -100), max: p(1000, 100) }, sheet: C.DEFAULT_SHEET };
+    const svg = C.plotSvg(s.doc, opts);
+    const pdf = C.plotPdf(s.doc, opts);
+    expect(pdf.startsWith("%PDF-1.4")).toBe(true);
+    expect(pdf.trimEnd().endsWith("%%EOF")).toBe(true);
+    // Every stroked segment on paper appears in the SVG as its own <line>.
+    const page = C.plotPage(s.doc, opts);
+    const svgLines = (svg.match(/<line /g) ?? []).length;
+    expect(svgLines).toBe(page.lines.length);
+    expect(pdf).toContain(`/MediaBox [0 0 841.8898 595.2756]`);
+  });
+
+  it("keeps a sheet through save and reload", () => {
+    const s = session();
+    const r = s.run(C.setSheet({ title: "Site plan", scale: 100, paper: "A2" }));
+    expect(r.ok).toBe(true);
+    const back = C.CadSession.load(C.serializeProjectJson(s.doc))!;
+    const sheet = C.sheetOf(back.doc);
+    expect(sheet.title).toBe("Site plan");
+    expect(sheet.scale).toBe(100);
+    expect(sheet.paper).toBe("A2");
+    expect(sheet.width).toBe(C.PAPER_SIZES.A2!.width);
+  });
 });
 
 describe("contract", () => {

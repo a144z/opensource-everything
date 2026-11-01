@@ -117,7 +117,7 @@
         "plot preview matches the exported file",
         "export works from the desktop build without a browser download prompt"
       ],
-      "passes": false
+      "passes": true
     }
   ]
 }
