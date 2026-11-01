@@ -36,6 +36,33 @@
           <button data-gizmo="scale" title="Scale (S)">Scale</button>
         </section>
 
+        <section class="views">
+          <h2>View</h2>
+          <div class="grid">
+            <button data-view="iso" title="Isometric (Ctrl+0)">Iso</button>
+            <button data-view="top" title="Top (Ctrl+1)">Top</button>
+            <button data-view="front" title="Front (Ctrl+2)">Front</button>
+            <button data-view="right" title="Right (Ctrl+3)">Right</button>
+            <button data-view="back" title="Back (Ctrl+4)">Back</button>
+            <button data-view="left" title="Left (Ctrl+5)">Left</button>
+            <button data-view="bottom" title="Bottom (Ctrl+6)">Bottom</button>
+            <button id="zoom-extents" title="Zoom extents (Z)">Fit view</button>
+          </div>
+          <div class="row">
+            <button id="proj-ortho" class="active" title="Orthographic: parallel edges stay parallel">Ortho</button>
+            <button id="proj-persp" title="Perspective: how the eye sees it">Perspective</button>
+          </div>
+          <div class="row">
+            <button id="style-shaded" class="active" title="Colour and light">Shaded</button>
+            <button id="style-hidden" title="White faces, black edges">Hidden line</button>
+            <button id="style-edges" title="Edges only, no faces">Edges</button>
+          </div>
+          <div class="row">
+            <button id="toggle-shadows" class="active" title="Cast and receive sun shadows">Shadows</button>
+            <button id="toggle-axes" class="active" title="Show the red, green and blue world axes">Axes</button>
+          </div>
+        </section>
+
         <section class="ops">
           <h2>Combine</h2>
           <button id="op-union" title="Union of two selected objects">Union</button>
@@ -66,8 +93,17 @@
           <ul id="outliner"></ul>
           <div class="row">
             <button id="sel-duplicate" title="Copy the selected object">Duplicate</button>
+            <button id="sel-instance" title="A copy that follows every later edit to the source">Instance</button>
+          </div>
+          <div class="row">
             <label for="opacity" title="Fade the selection to see through it">Opacity</label>
             <input id="opacity" type="range" min="10" max="100" step="5" value="100" />
+          </div>
+          <div class="row">
+            <label for="roughness" title="0 mirror, 100 chalk">Rough</label>
+            <input id="roughness" type="range" min="0" max="100" step="5" value="75" />
+            <label for="metallic" title="0 plastic, 100 metal">Metal</label>
+            <input id="metallic" type="range" min="0" max="100" step="5" value="0" />
           </div>
           <div class="row array">
             <label for="array-count">Count</label>

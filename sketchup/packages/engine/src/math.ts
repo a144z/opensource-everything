@@ -37,6 +37,7 @@ export function identity4(): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 }
 
+/** A pure translation, column-major: the vector lives in the last column. */
 export function translation4(v: Vec3): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, v[0], v[1], v[2], 1];
 }

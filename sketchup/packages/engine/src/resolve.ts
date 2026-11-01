@@ -7,5 +7,5 @@ export type BooleanMeshes = (a: MeshData, b: MeshData, op: BooleanOp) => MeshDat
 
 /** Recipe kinds that need other solids (or the kernel) to become a mesh. */
 export function dependsOnOthers(recipe: SolidRecipe): boolean {
-  return recipe.kind === "boolean" || recipe.kind === "transform";
+  return recipe.kind === "boolean" || recipe.kind === "transform" || recipe.kind === "instance";
 }

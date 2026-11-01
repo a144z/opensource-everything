@@ -7,7 +7,7 @@
  */
 
 import type { DocumentState, Envelope, SectionPlane, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
-import { SCHEMA_VERSION, clampOpacity } from "./types.js";
+import { SCHEMA_VERSION, clampOpacity, clampUnit } from "./types.js";
 import { emptyDocumentState } from "./commands.js";
 
 export interface SerializedSolid {
@@ -50,9 +50,14 @@ type Upgrader = (raw: Raw) => Raw;
  * 1 -> 2: added `meta.opacity`, `meta.tag` and top-level `section`. Every new
  * field is optional on read with a default that reproduces 1-file behaviour
  * (opaque, untagged, no cut), so the step only marks the file as understood.
+ *
+ * 2 -> 3: added `meta.roughness`/`meta.metallic` and the `instance` + `lathe`
+ * recipes. Again every new field defaults to the 2-file meaning (no sheen, no
+ * metal); the new recipe kinds simply never appear in a 2-file.
  */
 const MIGRATIONS: Record<number, Upgrader> = {
   1: (raw) => ({ ...raw, schemaVersion: 2 }),
+  2: (raw) => ({ ...raw, schemaVersion: 3 }),
 };
 
 export function deserialize(raw: unknown): DocumentState {
@@ -88,17 +93,28 @@ export function deserialize(raw: unknown): DocumentState {
         hidden: s.meta?.hidden === true,
         locked: s.meta?.locked === true,
         opacity: clampOpacity(s.meta?.opacity),
+        roughness: clampUnit(s.meta?.roughness, 0.75),
+        metallic: clampUnit(s.meta?.metallic, 0),
         tag: typeof s.meta?.tag === "string" ? s.meta.tag : "",
       },
     });
   }
-  // Booleans/transforms must point at solids that exist, and never at themselves.
+  // References must point at solids that exist, and the whole graph must be a
+  // forest. A self-reference is only the shortest ring; two instances could
+  // name each other and never mesh, so every chain is walked once here, at the
+  // boundary, where a bad file becomes a plain error instead of a hang.
   for (const solid of solids.values()) {
-    const r = solid.recipe;
-    const refs = r.kind === "boolean" ? [r.a, r.b] : r.kind === "transform" ? [r.child] : [];
-    for (const ref of refs) {
-      if (!solids.has(ref)) throw new Error(`solid ${solid.id} references missing solid ${ref}`);
-      if (ref === solid.id) throw new Error(`solid ${solid.id} references itself`);
+    const stack: SolidId[] = [solid.id];
+    const seen = new Set<SolidId>();
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) throw new Error(`solid ${solid.id} is its own ancestor`);
+      seen.add(id);
+      const cur = solids.get(id)!;
+      for (const ref of refsIn(cur.recipe)) {
+        if (!solids.has(ref)) throw new Error(`solid ${cur.id} references missing solid ${ref}`);
+        stack.push(ref);
+      }
     }
   }
   const envelope = (data["envelope"] as Envelope | null) ?? null;
@@ -134,7 +150,29 @@ export function deserializeJson(text: string): DocumentState {
   return deserialize(parsed);
 }
 
-const KINDS = new Set<SolidRecipe["kind"]>(["box", "extrude", "loop", "boolean", "transform", "mesh"]);
+/** The ids a recipe points at. Kept here so the reader never disagrees with the session. */export function refsIn(recipe: SolidRecipe): readonly SolidId[] {
+  switch (recipe.kind) {
+    case "boolean":
+      return [recipe.a, recipe.b];
+    case "transform":
+      return [recipe.child];
+    case "instance":
+      return [recipe.source];
+    default:
+      return [];
+  }
+}
+
+const KINDS = new Set<SolidRecipe["kind"]>([
+  "box",
+  "extrude",
+  "loop",
+  "boolean",
+  "transform",
+  "instance",
+  "mesh",
+  "lathe",
+]);
 
 function nums(v: unknown, n: number, label: string): number[] {
   if (!Array.isArray(v) || v.length !== n || !v.every((x) => typeof x === "number" && Number.isFinite(x))) {
@@ -193,6 +231,30 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
     case "transform":
       if (typeof raw.child !== "string") throw new Error(`solid ${id} transform needs a child`);
       return { kind: "transform", child: raw.child, matrix };
+    case "instance":
+      if (typeof raw.source !== "string" || raw.source === "") throw new Error(`solid ${id} instance needs a source`);
+      if (raw.source === id) throw new Error(`solid ${id} cannot be an instance of itself`);
+      return {
+        kind: "instance",
+        source: raw.source,
+        ...(raw.origin === undefined ? {} : { origin: nums(raw.origin, 16, "origin") }),
+        matrix,
+      };
+    case "lathe": {
+      if (!Array.isArray(raw.points) || raw.points.length < 3) throw new Error(`solid ${id} lathe needs 3+ profile points`);
+      const points = raw.points.map((p, i) => nums(p, 2, `points[${i}]`) as [number, number]);
+      const offset = raw.offset === undefined ? 0 : nums([raw.offset], 1, "offset")[0]!;
+      // The sweep is a whole turn by definition, so a segment count is a
+      // resolution hint, not a shape parameter: clamp it instead of refusing.
+      const rawSegments = typeof raw.segments === "number" && Number.isFinite(raw.segments) ? Math.trunc(raw.segments) : 32;
+      return {
+        kind: "lathe",
+        points,
+        offset,
+        segments: Math.max(3, Math.min(512, rawSegments)),
+        matrix,
+      };
+    }
     case "mesh": {
       if (!Array.isArray(raw.positions) || !Array.isArray(raw.indices)) throw new Error(`solid ${id} mesh is incomplete`);
       if (raw.positions.length % 9 !== 0 || raw.indices.length % 3 !== 0) throw new Error(`solid ${id} mesh is not whole triangles`);

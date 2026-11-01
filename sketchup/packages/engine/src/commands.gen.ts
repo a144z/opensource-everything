@@ -17,11 +17,27 @@ export const commandLabels = {
   'dimension': 'Dimension',
   'delete': 'Delete',
   'duplicate': 'Duplicate',
+  'instance': 'Make Instance',
   'array': 'Array',
   'union': 'Union',
   'subtract': 'Subtract',
   'intersect': 'Intersect',
   'fit': 'Fit to Envelope',
+  'viewIso': 'View: Isometric',
+  'viewTop': 'View: Top',
+  'viewFront': 'View: Front',
+  'viewRight': 'View: Right',
+  'viewBack': 'View: Back',
+  'viewLeft': 'View: Left',
+  'viewBottom': 'View: Bottom',
+  'zoomExtents': 'Zoom Extents',
+  'projectionOrtho': 'Projection: Orthographic',
+  'projectionPersp': 'Projection: Perspective',
+  'viewShaded': 'Style: Shaded',
+  'viewHiddenLine': 'Style: Hidden Line',
+  'viewEdges': 'Style: Edges Only',
+  'toggleShadows': 'Toggle Shadows',
+  'toggleAxes': 'Toggle Axes',
   'undo': 'Undo',
   'redo': 'Redo',
 } as const;
@@ -43,12 +59,22 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'tape': 'm',
   'dimension': 'd',
   'delete': 'Delete',
+  'viewIso': 'Ctrl+0',
+  'viewTop': 'Ctrl+1',
+  'viewFront': 'Ctrl+2',
+  'viewRight': 'Ctrl+3',
+  'viewBack': 'Ctrl+4',
+  'viewLeft': 'Ctrl+5',
+  'viewBottom': 'Ctrl+6',
+  'zoomExtents': 'z',
+  'projectionOrtho': 'Ctrl+7',
+  'projectionPersp': 'Ctrl+8',
   'undo': 'Ctrl+Z',
   'redo': 'Ctrl+Shift+Z',
 };
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
-export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'tape', 'dimension', 'delete', 'duplicate', 'array', 'union', 'subtract', 'intersect', 'fit', 'undo', 'redo'];
+export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'tape', 'dimension', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
 export function isCommand(id: string): id is CommandId {
@@ -86,6 +112,8 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'delete', label: commandLabels['delete'] };
     case 'duplicate':
       return { id: 'duplicate', label: commandLabels['duplicate'] };
+    case 'instance':
+      return { id: 'instance', label: commandLabels['instance'] };
     case 'array':
       return { id: 'array', label: commandLabels['array'] };
     case 'union':
@@ -96,6 +124,36 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'intersect', label: commandLabels['intersect'] };
     case 'fit':
       return { id: 'fit', label: commandLabels['fit'] };
+    case 'viewIso':
+      return { id: 'viewIso', label: commandLabels['viewIso'] };
+    case 'viewTop':
+      return { id: 'viewTop', label: commandLabels['viewTop'] };
+    case 'viewFront':
+      return { id: 'viewFront', label: commandLabels['viewFront'] };
+    case 'viewRight':
+      return { id: 'viewRight', label: commandLabels['viewRight'] };
+    case 'viewBack':
+      return { id: 'viewBack', label: commandLabels['viewBack'] };
+    case 'viewLeft':
+      return { id: 'viewLeft', label: commandLabels['viewLeft'] };
+    case 'viewBottom':
+      return { id: 'viewBottom', label: commandLabels['viewBottom'] };
+    case 'zoomExtents':
+      return { id: 'zoomExtents', label: commandLabels['zoomExtents'] };
+    case 'projectionOrtho':
+      return { id: 'projectionOrtho', label: commandLabels['projectionOrtho'] };
+    case 'projectionPersp':
+      return { id: 'projectionPersp', label: commandLabels['projectionPersp'] };
+    case 'viewShaded':
+      return { id: 'viewShaded', label: commandLabels['viewShaded'] };
+    case 'viewHiddenLine':
+      return { id: 'viewHiddenLine', label: commandLabels['viewHiddenLine'] };
+    case 'viewEdges':
+      return { id: 'viewEdges', label: commandLabels['viewEdges'] };
+    case 'toggleShadows':
+      return { id: 'toggleShadows', label: commandLabels['toggleShadows'] };
+    case 'toggleAxes':
+      return { id: 'toggleAxes', label: commandLabels['toggleAxes'] };
     case 'undo':
       return { id: 'undo', label: commandLabels['undo'] };
     case 'redo':

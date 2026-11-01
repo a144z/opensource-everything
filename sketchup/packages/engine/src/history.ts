@@ -8,6 +8,13 @@ export interface Patch {
   readonly envelopeBefore: Envelope | null;
   readonly envelopeAfter: Envelope | null;
   readonly label: string;
+  /**
+   * Ids this patch deletes, whether or not the other direction also mentions
+   * them. A boolean consumes its operands, so it appears in `forward` as a new
+   * solid and in `backward` as two deletions; only this list says which ids are
+   * really gone, and cache invalidation needs to know.
+   */
+  readonly removed?: readonly SolidId[];
   /** Section plane before/after; undefined means "unchanged". */
   readonly sectionBefore?: SectionPlane | null;
   readonly sectionAfter?: SectionPlane | null;

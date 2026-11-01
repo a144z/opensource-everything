@@ -12,6 +12,7 @@ import { analyseMesh, isFiniteBounds, withMatrix } from "./analyze.js";
 import { patchOf, type Command } from "./command.js";
 import {
   identity4,
+  isIdentity4,
   multiply4,
   scale4,
   sub3,
@@ -21,7 +22,7 @@ import {
   withTranslation,
 } from "./math.js";
 import type { BooleanOp, DocumentState, Envelope, SectionPlane, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
-import { DEFAULT_COLORS, SCHEMA_VERSION, clampOpacity } from "./types.js";
+import { DEFAULT_COLORS, SCHEMA_VERSION, clampOpacity, clampUnit } from "./types.js";
 import { validateRecipe as normaliseRecipe } from "./io.js";
 
 export type Resolve = (recipe: SolidRecipe) => MeshData;
@@ -42,8 +43,12 @@ export function labelFor(recipe: SolidRecipe): string {
       return recipe.op === "union" ? "Union" : recipe.op === "difference" ? "Cut" : "Intersect";
     case "transform":
       return "Copy";
+    case "instance":
+      return "Instance";
     case "mesh":
       return "Mesh";
+    case "lathe":
+      return "Lathe";
   }
 }
 
@@ -68,6 +73,8 @@ export function newMeta(doc: DocumentState, recipe: SolidRecipe, meta?: Partial<
     hidden: meta?.hidden ?? false,
     locked: meta?.locked ?? false,
     opacity: clampOpacity(meta?.opacity),
+    roughness: clampUnit(meta?.roughness, 0.75),
+    metallic: clampUnit(meta?.metallic, 0),
     tag: meta?.tag ?? "",
   };
 }
@@ -139,8 +146,12 @@ export function setRecipe(id: SolidId, recipe: SolidRecipe, label = "Edit"): Com
     label,
     apply(doc, ctx) {
       const prev = requireSolid(doc, id);
-      validateRecipe(recipe, ctx.resolve);
       const next: Solid = { ...prev, revision: prev.revision + 1, recipe };
+      // Validate against the document the patch would leave behind, or a cycle
+      // (this solid becoming an ancestor of itself) would go unnoticed.
+      const after = new Map(doc.solids);
+      after.set(id, next);
+      validateRecipe(recipe, (r) => ctx.resolveWith?.(r, after) ?? ctx.resolve(r));
       return patchOf(doc, new Map([[id, next]]), new Map([[id, prev]]), label);
     },
   };
@@ -164,7 +175,7 @@ export function pullFace(id: SolidId, recipeOrDistance: SolidRecipe | number): C
     apply(doc, ctx) {
       const prev = requireSolid(doc, id);
       const r = prev.recipe;
-      if (r.kind === "boolean" || r.kind === "transform") {
+      if (r.kind === "boolean" || r.kind === "transform" || r.kind === "instance") {
         throw new Error("push/pull needs a primitive; pull its sources instead");
       }
       let recipe: SolidRecipe;
@@ -287,6 +298,11 @@ export function setMatrix(ids: readonly SolidId[], matrix: readonly number[], la
   };
 }
 
+/**
+ * Pinched copy (`transform` recipe): the child's mesh is baked in at copy time,
+ * so later edits to the source do not follow. `delta` moves the copy in world
+ * space.
+ */
 export function duplicateSolid(id: SolidId, delta: Vec3 = [0, 0, 0]): Command {
   return {
     kind: "duplicateSolid",
@@ -307,6 +323,57 @@ export function duplicateSolid(id: SolidId, delta: Vec3 = [0, 0, 0]): Command {
   };
 }
 
+/**
+ * Live copy (`instance` recipe): the copy resolves the source's mesh every time,
+ * so editing the source edits every instance. `delta` offsets the instance from
+ * the source in world space.
+ *
+ * A source that is itself a pinned copy is flattened first: an instance of a
+ * copy whose only difference was its matrix would otherwise apply that matrix
+ * twice and land in the wrong place.
+ */
+export function instanceCopy(id: SolidId, delta: Vec3 = [0, 0, 0]): Command {
+  return {
+    kind: "instanceCopy",
+    label: "Make Instance",
+    apply(doc, ctx) {
+      const src = requireSolid(doc, id);
+      if (delta.every((d) => d === 0)) throw new Error("an instance must be placed away from its source");
+      const newId = ctx.nextId();
+      // A pinned copy is only ever `source + matrix`, so an instance points at
+      // the copy's own child and carries both matrices. Pointing at the copy
+      // instead would apply the copy's matrix twice.
+      const source = src.recipe.kind === "transform" ? requireSolid(doc, src.recipe.child) : src;
+      const pinned = src.recipe.kind === "transform";
+      // `origin` cancels whatever the source is already carrying (its own move
+      // or rotation), and the instance's matrix is the user's world offset. Two
+      // instances of the same window can then sit on different walls without
+      // either of them stacking the source's matrix on top of its own. A pinned
+      // copy's placement is already the offset the user asked for, so it is
+      // kept as the instance's own matrix rather than cancelled.
+      const at = pinned ? src.recipe.matrix : source.recipe.matrix;
+      const recipe: SolidRecipe = {
+        kind: "instance",
+        source: source.id,
+        origin: [...at],
+        matrix: multiply4(at, translation4(delta)),
+      };
+      const copy: Solid = {
+        id: newId,
+        revision: 1,
+        recipe,
+        meta: { ...src.meta, name: `${src.meta.name} instance`, hidden: false, locked: false },
+      };
+      // Validate the graph the patch would leave behind, including this new
+      // solid, so a source that (transitively) points back here is refused.
+      const after = new Map(doc.solids);
+      after.set(newId, copy);
+      validateRecipe(recipe, (r) => ctx.resolveWith?.(r, after) ?? ctx.resolve(r));
+      return patchOf(doc, new Map([[newId, copy]]), new Map([[newId, null]]), "Make Instance");
+    },
+  };
+}
+
 /** Linear array copy: `count` new copies at `step` intervals (task L2-4). */
 export function arrayCopy(id: SolidId, count: number, step: Vec3): Command {
   return {
@@ -323,10 +390,14 @@ export function arrayCopy(id: SolidId, count: number, step: Vec3): Command {
         const newId = `${id}~a${i}`;
         if (doc.solids.has(newId) || forward.has(newId)) throw new Error("array copy id collision");
         const offset: Vec3 = [step[0] * i, step[1] * i, step[2] * i];
+        // The step is already a world vector, but it was being added through
+        // the solid's own matrix, so a rotated source arrayed off its own axis.
+        // Translate in world first, then let the model matrix do its thing.
+        const matrix = multiply4(src.recipe.matrix, translation4(offset));
         forward.set(newId, {
           id: newId,
           revision: 1,
-          recipe: { ...src.recipe, matrix: withTranslation(src.recipe.matrix, offset) },
+          recipe: { ...src.recipe, matrix },
           meta: { ...src.meta, name: `${src.meta.name} ${i + 1}`, hidden: false, locked: false },
         });
         backward.set(newId, null);
@@ -431,8 +502,8 @@ export function setMeta(id: SolidId, patch: Partial<SolidMeta>, label = "Edit"):
   };
 }
 
-export function setColor(ids: readonly SolidId[], color: string): Command {  return {
-    kind: "setColor",
+export function setColor(ids: readonly SolidId[], color: string): Command {
+  return {    kind: "setColor",
     label: "Colour",
     apply(doc) {
       const forward = new Map<SolidId, Solid | null>();
@@ -449,6 +520,43 @@ export function setColor(ids: readonly SolidId[], color: string): Command {  ret
 }
 
 /* ------------------------------------------------------------------ tags */
+
+/**
+ * Surface finish: roughness (0 mirror to 1 rough) and metal (0 to 1). Both are
+ * clamped rather than refused, the same policy as opacity, because a slider can
+ * overshoot by a rounding error and that must not fail a whole command.
+ */
+export function setFinish(ids: readonly SolidId[], roughness: number, metallic: number): Command {
+  if (typeof roughness !== "number" || !Number.isFinite(roughness)) {
+    throw new RangeError("roughness must be a number from 0 to 1");
+  }
+  if (typeof metallic !== "number" || !Number.isFinite(metallic)) {
+    throw new RangeError("metallic must be a number from 0 to 1");
+  }
+  const rough = clampUnit(roughness, 0.75);
+  const metal = clampUnit(metallic, 0);
+  const label = metal > 0.5 ? "Finish: metal" : rough > 0.9 ? "Finish: matte" : "Finish";
+  return {
+    kind: "setFinish",
+    label,
+    apply(doc) {
+      const forward = new Map<SolidId, Solid | null>();
+      const backward = new Map<SolidId, Solid | null>();
+      for (const id of ids) {
+        const prev = doc.solids.get(id);
+        if (!prev) continue;
+        if (prev.meta.roughness === rough && prev.meta.metallic === metal) continue;
+      forward.set(id, {
+        ...prev,
+        revision: prev.revision + 1,
+        meta: { ...prev.meta, roughness: rough, metallic: metal },
+      });
+        backward.set(id, prev);
+      }
+      return patchOf(doc, forward, backward, label);
+    },
+  };
+}
 
 /**
  * Put objects on a tag (SketchUp's "layer"). A tag is a name only: it never
@@ -565,7 +673,8 @@ export function setSection(plane: SectionPlane | null): Command {
   };
 }
 
-/** Set or clear the fit envelope. Setting one is not a geometry change. */export function setEnvelope(envelope: Envelope | null): Command {
+/** Set or clear the fit envelope. Setting one is not a geometry change. */
+export function setEnvelope(envelope: Envelope | null): Command {
   const label = envelope ? "Set fit envelope" : "Clear fit envelope";
   return {
     kind: "setEnvelope",

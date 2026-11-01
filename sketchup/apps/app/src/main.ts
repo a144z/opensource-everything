@@ -9,16 +9,20 @@ import {
   arrayCopy,
   booleanSolids,
   centreInEnvelope,
+  commandForEvent,
   commandKeys,
+  commandLabels,
   deleteSolids,
   deserializeJson,
   dimensionLength,
   duplicateSolid,
   fitToEnvelope,
+  instanceCopy,
   renameSolid,
   serializeJson,
   setColor,
   setEnvelope,
+  setFinish,
   setMatrix,
   setMeta,
   setOpacity,
@@ -57,6 +61,7 @@ const snapper = new Snapper(session);
 let unit: "mm" | "cm" | "m" | "in" = "mm";
 let selection: ReadonlySet<SolidId> = new Set();
 let gizmoMode: "translate" | "rotate" | "scale" = "translate";
+let projection: "ortho" | "perspective" = "ortho";
 const cursor = { x: 0, y: 0 };
 
 const view = new View(viewport, session, {
@@ -260,6 +265,32 @@ function outlinerRow(solid: Solid): HTMLLIElement {
   return li;
 }
 
+/**
+ * Tag groups in display order, each keeping document order inside it.
+ * Untagged objects come last under their own heading; with no tags at all the
+ * outliner stays a plain list, exactly as before groups existed.
+ */
+function groupByTag(solids: Iterable<Solid>): Map<string | null, Solid[]> {
+  const groups = new Map<string | null, Solid[]>();
+  let tagged = false;
+  for (const solid of solids) {
+    if (solid.meta.tag !== "") tagged = true;
+    const key = solid.meta.tag === "" ? null : solid.meta.tag;
+    const list = groups.get(key);
+    if (list) list.push(solid);
+    else groups.set(key, [solid]);
+  }
+  if (!tagged) return new Map([[null, [...solids]]]);
+  // Named tags first, alphabetically, then whatever has no tag.
+  const ordered = new Map<string | null, Solid[]>();
+  for (const key of [...groups.keys()].filter((k): k is string => k !== null).sort((a, b) => a.localeCompare(b))) {
+    ordered.set(key, groups.get(key)!);
+  }
+  const loose = groups.get(null);
+  if (loose) ordered.set(null, loose);
+  return ordered;
+}
+
 /** Run a mutation and report its failure in the hint line; never throws at the UI. */
 function quietly(action: () => void, done?: string): void {
   try {
@@ -317,7 +348,17 @@ function renderPanel(): void {
   const doc = session.document;
   const outliner = $("outliner");
   outliner.innerHTML = "";
-  for (const solid of doc.solids.values()) outliner.append(outlinerRow(solid));
+  // Grouping is presentation only: the document has one flat list, and every
+  // row is still one object with the same commands attached.
+  for (const [tag, solids] of groupByTag(doc.solids.values())) {
+    if (tag !== null) {
+      const head = document.createElement("li");
+      head.className = "group";
+      head.textContent = `${tag || "Untagged"} (${solids.length})`;
+      outliner.append(head);
+    }
+    for (const solid of solids) outliner.append(outlinerRow(solid));
+  }
 
   const fit = session.fit();
   renderFit(fit);
@@ -337,9 +378,17 @@ function renderPanel(): void {
   for (const b of document.querySelectorAll<HTMLButtonElement>("[data-gizmo]")) {
     b.classList.toggle("active", b.dataset["gizmo"] === gizmoMode);
   }
+  ($("proj-ortho") as HTMLButtonElement).classList.toggle("active", projection === "ortho");
+  ($("proj-persp") as HTMLButtonElement).classList.toggle("active", projection === "perspective");
+  ($("style-shaded") as HTMLButtonElement).classList.toggle("active", view.style === "shaded");
+  ($("style-hidden") as HTMLButtonElement).classList.toggle("active", view.style === "hiddenLine");
+  ($("style-edges") as HTMLButtonElement).classList.toggle("active", view.style === "edges");
+  ($("toggle-shadows") as HTMLButtonElement).classList.toggle("active", view.shadows);
+  ($("toggle-axes") as HTMLButtonElement).classList.toggle("active", view.axesVisible);
   const enabled = selection.size >= 1;
   ($("sel-array") as HTMLButtonElement).disabled = !enabled;
   ($("sel-duplicate") as HTMLButtonElement).disabled = !enabled;
+  ($("sel-instance") as HTMLButtonElement).disabled = !enabled;
 }
 
 function renderFit(fit: FitResult): void {
@@ -373,6 +422,14 @@ function renderFit(fit: FitResult): void {
   const first = sel ? session.document.solids.get(sel) : undefined;
   slider.value = String(Math.round((first?.meta.opacity ?? 1) * 100));
   slider.disabled = selection.size === 0;
+  // Finish follows the selection for the same reason: two sliders that read
+  // "rough 75, metal 0" on a chrome object would be lying about the model.
+  const rough = $("roughness") as HTMLInputElement;
+  const metal = $("metallic") as HTMLInputElement;
+  rough.value = String(Math.round((first?.meta.roughness ?? 0.75) * 100));
+  metal.value = String(Math.round((first?.meta.metallic ?? 0) * 100));
+  rough.disabled = selection.size === 0;
+  metal.disabled = selection.size === 0;
 }
 
 function boundsLine(fit: FitResult): string {
@@ -551,6 +608,18 @@ function runCommand(id: CommandId): void {
         refresh();
         return;
       }
+      case "instance": {
+        const first = [...selection][0];
+        if (!first) {
+          hint.textContent = "Make Instance: select something first.";
+          return;
+        }
+        const patch = session.execute(instanceCopy(first, [200, 0, 0]));
+        setSelection([...patch.forward.keys()]);
+        hint.textContent = "Instance made (200 mm to the right); edit the source and this follows.";
+        refresh();
+        return;
+      }
       case "array":
         runArray();
         return;
@@ -575,6 +644,36 @@ function runCommand(id: CommandId): void {
         hint.textContent = "Scaled down to fit the envelope.";
         refresh();
         return;
+      case "viewIso":
+      case "viewTop":
+      case "viewFront":
+      case "viewRight":
+      case "viewBack":
+      case "viewLeft":
+      case "viewBottom":
+        view.standardView(id.slice(4).toLowerCase() as "iso" | "top" | "front" | "right" | "back" | "left" | "bottom");
+        hint.textContent = `${commandLabels[id]} view.`;
+        renderPanel();
+        return;
+      case "zoomExtents":
+        view.zoomExtents();
+        hint.textContent = "Framed the model.";
+        return;
+      case "projectionOrtho":
+      case "projectionPersp":
+        setProjection(id === "projectionPersp" ? "perspective" : "ortho");
+        return;
+      case "viewShaded":
+      case "viewHiddenLine":
+      case "viewEdges":
+        setStyle(id === "viewShaded" ? "shaded" : id === "viewHiddenLine" ? "hiddenLine" : "edges");
+        return;
+      case "toggleShadows":
+        setShadows(!view.shadows);
+        return;
+      case "toggleAxes":
+        setAxes(!view.axesVisible);
+        return;
     }
   } catch (err) {
     hint.textContent = (err as Error).message;
@@ -587,6 +686,7 @@ function commandEnabled(id: CommandId): boolean {
   switch (id) {
     case "delete":
     case "duplicate":
+    case "instance":
       return count >= 1;
     case "union":
     case "subtract":
@@ -607,6 +707,38 @@ const palette = new CommandPalette({ run: runCommand, enabled: commandEnabled })
 function setGizmo(mode: "translate" | "rotate" | "scale"): void {
   gizmoMode = mode;
   view.setGizmoMode(mode);
+  renderPanel();
+}
+
+/**
+ * Switch lens. The renderer keeps orbiting the same target, so this is the
+ * cheap, reversible half of the View commands; the toolbar buttons and the
+ * palette both route here rather than touching the camera themselves.
+ */
+function setProjection(kind: "ortho" | "perspective"): void {
+  view.setProjection(kind);
+  projection = kind;
+  hint.textContent = kind === "ortho" ? "Orthographic projection." : "Perspective projection.";
+  renderPanel();
+}
+
+/** Drawing style: shaded, hidden line or edges only. */
+function setStyle(style: "shaded" | "hiddenLine" | "edges"): void {
+  view.setStyle(style);
+  hint.textContent =
+    style === "shaded" ? "Shaded style." : style === "hiddenLine" ? "Hidden line style." : "Edges only.";
+  renderPanel();
+}
+
+function setShadows(on: boolean): void {
+  view.setShadows(on);
+  hint.textContent = on ? "Shadows on." : "Shadows off.";
+  renderPanel();
+}
+
+function setAxes(on: boolean): void {
+  view.setAxesVisible(on);
+  hint.textContent = on ? "Axes shown." : "Axes hidden.";
   renderPanel();
 }
 
@@ -640,6 +772,22 @@ for (const b of document.querySelectorAll<HTMLButtonElement>("[data-tool]")) {
 for (const b of document.querySelectorAll<HTMLButtonElement>("[data-gizmo]")) {
   b.addEventListener("click", () => setGizmo(b.dataset["gizmo"] as "translate" | "rotate" | "scale"));
 }
+// View buttons are shortcuts for palette commands, so the two cannot disagree.
+for (const b of document.querySelectorAll<HTMLButtonElement>("[data-view]")) {
+  b.addEventListener("click", () => {
+    const name = b.dataset["view"] as "iso" | "top" | "front" | "right" | "back" | "left" | "bottom";
+    runCommand(`view${name[0]!.toUpperCase()}${name.slice(1)}` as CommandId);
+  });
+}
+$("zoom-extents").addEventListener("click", () => runCommand("zoomExtents"));
+$("proj-ortho").addEventListener("click", () => runCommand("projectionOrtho"));
+$("proj-persp").addEventListener("click", () => runCommand("projectionPersp"));
+// Style, shadow and axis buttons are the same commands the palette runs.
+$("style-shaded").addEventListener("click", () => runCommand("viewShaded"));
+$("style-hidden").addEventListener("click", () => runCommand("viewHiddenLine"));
+$("style-edges").addEventListener("click", () => runCommand("viewEdges"));
+$("toggle-shadows").addEventListener("click", () => runCommand("toggleShadows"));
+$("toggle-axes").addEventListener("click", () => runCommand("toggleAxes"));
 
 $("env-set").addEventListener("click", setEnvelopeFromInputs);
 $("env-clear").addEventListener("click", () => {
@@ -674,6 +822,21 @@ $("opacity").addEventListener("change", () => {
   const percent = Number(($("opacity") as HTMLInputElement).value);
   quietly(() => session.execute(setOpacity(ids, percent / 100)), `Opacity ${percent}%.`);
 });
+
+/** Both finish sliders write together, so a drag of one never resets the other. */
+function applyFinish(): void {
+  const ids = [...selection];
+  if (ids.length === 0) {
+    hint.textContent = "Finish: select something first.";
+    return;
+  }
+  const rough = Number(($("roughness") as HTMLInputElement).value) / 100;
+  const metal = Number(($("metallic") as HTMLInputElement).value) / 100;
+  quietly(() => session.execute(setFinish(ids, rough, metal)), `Finish: rough ${Math.round(rough * 100)}%, metal ${Math.round(metal * 100)}%.`);
+}
+$("roughness").addEventListener("change", applyFinish);
+$("metallic").addEventListener("change", applyFinish);
+$("sel-instance").addEventListener("click", () => runCommand("instance"));
 
 $("tag-apply").addEventListener("click", () => {
   const ids = [...selection];
@@ -766,7 +929,7 @@ $("file-input").addEventListener("change", (e) => {
 
 $("undo").addEventListener("click", () => runCommand("undo"));
 $("redo").addEventListener("click", () => runCommand("redo"));
-$("zoom").addEventListener("click", () => view.zoomExtents());
+$("zoom").addEventListener("click", () => runCommand("zoomExtents"));
 
 window.addEventListener("keydown", (e) => {
   const target = e.target as HTMLElement | null;
@@ -809,20 +972,7 @@ window.addEventListener("keydown", (e) => {
 
 /** The command a key event maps to, from the generated shortcut table. */
 function shortcutFor(e: KeyboardEvent): CommandId | null {
-  const key = e.key === " " ? " " : e.key;
-  const mod = e.ctrlKey || e.metaKey;
-  const wanted = [
-    mod ? `Ctrl+${e.shiftKey ? "Shift+" : ""}${key.toUpperCase()}` : null,
-    mod ? `Ctrl+${key.toUpperCase()}` : null,
-    !mod && !e.altKey ? key.toLowerCase() : null,
-  ].filter((k): k is string => k !== null);
-
-  for (const candidate of wanted) {
-    for (const [id, shortcut] of Object.entries(commandKeys)) {
-      if (shortcut.toLowerCase() === candidate.toLowerCase()) return id as CommandId;
-    }
-  }
-  return null;
+  return commandForEvent(commandKeys, e) as CommandId | null;
 }
 
 view.renderer.domElement.addEventListener("pointermove", (e) => {

@@ -10,6 +10,7 @@ import {
   extrudeRect,
   hashMesh,
   isClosedMesh,
+  latheSolid,
   meshVolume,
   type Aabb,
   type MeshData,
@@ -26,7 +27,13 @@ export function isFiniteBounds(b: Aabb): boolean {
 
 /** True for recipes that can be meshed with no other solid and no kernel. */
 export function isStandaloneRecipe(recipe: SolidRecipe): boolean {
-  return recipe.kind === "box" || recipe.kind === "extrude" || recipe.kind === "loop" || recipe.kind === "mesh";
+  return (
+    recipe.kind === "box" ||
+    recipe.kind === "extrude" ||
+    recipe.kind === "loop" ||
+    recipe.kind === "mesh" ||
+    recipe.kind === "lathe"
+  );
 }
 
 /** The mesh before the recipe's own matrix is applied. */
@@ -51,8 +58,11 @@ export function baseMesh(recipe: SolidRecipe): MeshData {
       return extrudeLoop(recipe.points, recipe.plane, recipe.distance);
     case "mesh":
       return { positions: Float32Array.from(recipe.positions), indices: Uint32Array.from(recipe.indices) };
+    case "lathe":
+      return latheSolid(recipe.points, { offset: recipe.offset, segments: recipe.segments });
     case "boolean":
     case "transform":
+    case "instance":
       throw new Error(`recipe "${recipe.kind}" needs the document; resolve it through the session`);
   }
 }

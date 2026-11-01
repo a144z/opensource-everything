@@ -6,6 +6,7 @@ import {
   deserializeJson,
   serializeJson,
   setOpacity,
+  SCHEMA_VERSION,
   setSection,
   setTag,
   setTagVisible,
@@ -128,11 +129,14 @@ describe("schema 2 fields", () => {
     delete solids[0]!.meta["opacity"];
     delete solids[0]!.meta["tag"];
     const loaded = deserialize(raw);
-    expect(loaded.schemaVersion).toBe(2);
+    // The reader always returns the current schema; the test's point is that a
+    // 1-file walked every step and got the defaults each one introduced.
+    expect(loaded.schemaVersion).toBe(SCHEMA_VERSION);
     expect(loaded.section).toBeNull();
     const solid = [...loaded.solids.values()][0]!;
     expect(solid.meta.opacity).toBe(1);
     expect(solid.meta.tag).toBe("");
+    expect(solid.meta.metallic).toBe(0);
   });
 
   it("refuses a file from a newer schema rather than guessing", () => {

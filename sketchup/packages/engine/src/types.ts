@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -40,6 +40,29 @@ export type SolidRecipe =
       readonly distance: number;
     })
   | (RecipeBase & {
+      /**
+       * Pinched copy: the same mesh as `source`, kept as geometry rather than a
+       * reference. Moving the source later does NOT move this.
+       */
+      readonly kind: "transform";
+      readonly child: SolidId;
+    })
+  | (RecipeBase & {
+      /**
+       * Instance: resolves the source's mesh every time, so editing the source
+       * edits every copy. The instance's own matrix is applied on top, which is
+       * what lets two instances of one window sit on different walls.
+       */
+      readonly kind: "instance";
+      readonly source: SolidId;
+      /**
+       * Where the source sits in the world, when it is not at the origin. An
+       * instance is read as "the source, here": subtracting this makes that
+       * true even after the source has been moved.
+       */
+      readonly origin?: readonly number[];
+    })
+  | (RecipeBase & {
       /** Closed ring in a plane, extruded along the plane normal by `distance`. */
       readonly kind: "loop";
       readonly points: readonly Vec2[];
@@ -54,15 +77,18 @@ export type SolidRecipe =
       readonly b: SolidId;
     })
   | (RecipeBase & {
-      /** Rigid move / rotate / uniform scale of another solid's mesh. */
-      readonly kind: "transform";
-      readonly child: SolidId;
-    })
-  | (RecipeBase & {
       /** Imported triangle soup (STL, glTF); already a closed mesh. */
       readonly kind: "mesh";
       readonly positions: readonly number[];
       readonly indices: readonly number[];
+    })
+  | (RecipeBase & {
+      /** Lathe: a profile ring swept once around an axis in the XZ plane. */
+      readonly kind: "lathe";
+      readonly points: readonly Vec2[];
+      /** Distance of the axis from the profile plane, in mm. */
+      readonly offset: number;
+      readonly segments: number;
     });
 
 export type RecipeKind = SolidRecipe["kind"];
@@ -75,6 +101,13 @@ export interface SolidMeta {
   /** 0 (invisible) to 1 (opaque). Tagged geometry is drawn translucent. */
   readonly opacity: number;
   /**
+   * Surface finish, 0 rough to 1 mirror-like, and 0 to 1 metal. Colour alone
+   * cannot say "this is brushed steel"; these two are what SketchUp's material
+   * browser offers and what a renderer needs beyond a flat `color`.
+   */
+  readonly roughness: number;
+  readonly metallic: number;
+  /**
    * The tag (SketchUp calls it a layer). Tags never group geometry — deleting a
    * tag is not a geometry change — they only name a set of objects that share
    * visibility, which is why this is a plain string and not a parent id.
@@ -84,6 +117,12 @@ export interface SolidMeta {
 
 /** Opacity the user cannot meaningfully see; clamping keeps saves honest. */
 export function clampOpacity(value: unknown, fallback = 1): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
+}
+
+/** Roughness / metal, clamped to their one legal range, with a default. */
+export function clampUnit(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.min(1, Math.max(0, value));
 }

@@ -98,6 +98,32 @@ button.active {
   font-size: 11px;
 }
 
+/* View pad: three columns of standard views, then the lens row. */
+.views .grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.views .grid button {
+  padding: 5px 2px;
+  font-size: 11px;
+}
+
+#outliner li.group {
+  cursor: default;
+  color: var(--dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 6px;
+  padding: 2px 4px;
+}
+
+#outliner li.group:hover {
+  background: transparent;
+}
+
 .fit label {
   display: flex;
   align-items: center;

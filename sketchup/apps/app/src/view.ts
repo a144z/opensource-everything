@@ -59,12 +59,21 @@ interface CachedMesh {
 export class View {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
-  readonly camera: THREE.OrthographicCamera;
+  /**
+   * The live camera. Orthographic until the user switches to perspective; both
+   * types share every call site (`project`, `lookAt`, matrices), so the rest of
+   * the file never asks which one it is holding.
+   */
+  camera: THREE.OrthographicCamera | THREE.PerspectiveCamera;
   readonly controls: OrbitControls;
   readonly gizmo: TransformControls;
   readonly content = new THREE.Group();
   readonly grid: THREE.GridHelper;
   readonly axes: THREE.AxesHelper;
+  /** The shadow-casting sun; `setShadows` toggles its shadow, not the light. */
+  readonly solar: THREE.DirectionalLight;
+  /** The shadow-catching floor. Visible only while shadows are on. */
+  readonly ground: THREE.Mesh;
 
   #session: Session;
   #events: ViewEvents;
@@ -78,6 +87,9 @@ export class View {
   #downAt: { x: number; y: number } | null = null;
   #gizmoStart: { id: SolidId; matrix: number[] } | null = null;
   #shift = false;
+  #style: "shaded" | "hiddenLine" | "edges" = "shaded";
+  #shadows = true;
+  #axesVisible = true;
   /** Live drag rectangle; created lazily so the overlay sits over the canvas. */
   #marqueeEl: HTMLElement | null = null;
 
@@ -127,9 +139,11 @@ export class View {
     this.scene.add(this.gizmo.getHelper());
 
     this.scene.add(this.content);
-    const { grid, axes } = this.#buildEnvironment();
-    this.grid = grid;
-    this.axes = axes;
+    const env = this.#buildEnvironment();
+    this.grid = env.grid;
+    this.axes = env.axes;
+    this.solar = env.sun;
+    this.ground = env.ground;
     this.#applySection();
 
     this.#resizeObserver = new ResizeObserver(() => this.#resize(container));
@@ -180,8 +194,14 @@ export class View {
   /** mm per screen pixel at the orbit target; snapping uses it for screen-constant tolerance. */
   mmPerPixel(): number {
     const r = this.renderer.domElement.getBoundingClientRect();
-    const worldHeight = (this.camera.top - this.camera.bottom) / this.camera.zoom;
-    return worldHeight / Math.max(r.height, 1);
+    const px = Math.max(r.height, 1);
+    const cam = this.camera;
+    if (cam instanceof THREE.PerspectiveCamera) {
+      // Height of the view frustum at the distance the user is orbiting around.
+      const distance = cam.position.distanceTo(this.controls.target);
+      return (2 * distance * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2))) / px;
+    }
+    return (cam.top - cam.bottom) / cam.zoom / px;
   }
 
   zoomExtents(): void {
@@ -199,12 +219,60 @@ export class View {
     this.camera.zoom = 1;
     const aspect = Math.max(this.renderer.domElement.clientWidth, 1) / Math.max(this.renderer.domElement.clientHeight, 1);
     const halfH = radius;
-    this.camera.top = halfH;
-    this.camera.bottom = -halfH;
-    this.camera.left = -halfH * aspect;
-    this.camera.right = halfH * aspect;
-    this.camera.updateProjectionMatrix();
+    const cam = this.camera;
+    if (cam instanceof THREE.PerspectiveCamera) {
+      // Pull the camera back far enough for a sphere of `radius` to fit the
+      // narrower of the two half-angles.
+      const vFov = THREE.MathUtils.degToRad(cam.fov);
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const distance = radius / Math.sin(Math.min(vFov, hFov) / 2);
+      const away = cam.position.clone().sub(center).normalize();
+      cam.position.copy(center).addScaledVector(away, distance);
+    } else {
+      cam.top = halfH;
+      cam.bottom = -halfH;
+      cam.left = -halfH * aspect;
+      cam.right = halfH * aspect;
+    }
+    cam.far = Math.max(radius * 40 + cam.position.distanceTo(center), 40000);
+    cam.updateProjectionMatrix();
     this.controls.update();
+    this.#dirty = true;
+  }
+
+  /**
+   * Orthographic (SketchUp's default, and the only honest view for measuring)
+   * or perspective (how the eye reads a finished model). The orbit target and
+   * direction are kept, so switching is a lens change, not a camera move.
+   */
+  setProjection(kind: "ortho" | "perspective"): void {
+    const old = this.camera;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const aspect = Math.max(r.width, 1) / Math.max(r.height, 1);
+    const position = old.position.clone();
+    const target = this.controls.target.clone();
+    let next: THREE.OrthographicCamera | THREE.PerspectiveCamera;
+    if (kind === "perspective") {
+      // Keep the same size at the orbit target: distance * tan(fov/2) = halfH.
+      const halfH = old instanceof THREE.PerspectiveCamera ? (old.position.distanceTo(target) * Math.tan(THREE.MathUtils.degToRad(old.fov / 2)) / old.zoom) : (old.top - old.bottom) / 2 / old.zoom;
+      const distance = halfH / Math.tan(THREE.MathUtils.degToRad(35 / 2));
+      const away = position.clone().sub(target).normalize();
+      position.copy(target).addScaledVector(away, distance);
+      const cam = new THREE.PerspectiveCamera(35, aspect, Math.max(distance / 1000, 1), distance * 40);
+      cam.position.copy(position);
+      next = cam;
+    } else {
+      const halfH = position.distanceTo(target) * Math.tan(THREE.MathUtils.degToRad((old as THREE.PerspectiveCamera).fov / 2));
+      const cam = new THREE.OrthographicCamera(-halfH * aspect, halfH * aspect, halfH, -halfH, -20000, 40000);
+      cam.position.copy(position);
+      next = cam;
+    }
+    next.up.copy(old.up);
+    next.lookAt(target);
+    this.camera = next;
+    this.controls.object = next;
+    this.controls.update();
+    this.setTool(this.tool);
     this.#dirty = true;
   }
 
@@ -228,10 +296,89 @@ export class View {
     return { x: ((v.x + 1) / 2) * r.width + r.left, y: ((1 - v.y) / 2) * r.height + r.top };
   }
 
+  /**
+   * Point the camera along a world direction and redraw. This is the only
+   * thing that changes `up`, so after an outside orbit the next view command
+   * still lands on the standard axes instead of a tilted one.
+   */
+  setView(direction: Vec3): void {
+    const dir = new THREE.Vector3(...direction).normalize();
+    const target = this.controls.target.clone();
+    const distance = Math.max(this.camera.position.distanceTo(target), 1);
+    const up = Math.abs(dir.z) > 0.999 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    this.camera.up.copy(up);
+    this.camera.position.copy(target).addScaledVector(dir, distance);
+    this.camera.lookAt(target);
+    this.controls.update();
+    this.#dirty = true;
+  }
+
+  /** The six standard views plus isometric, named the way the toolbar names them. */
+  standardView(name: "iso" | "top" | "front" | "right" | "back" | "left" | "bottom"): void {
+    const dirs: Record<typeof name, Vec3> = {
+      iso: [1, -1, 0.8],
+      top: [0, 0, 1],
+      bottom: [0, 0, -1],
+      front: [0, -1, 0],
+      back: [0, 1, 0],
+      right: [1, 0, 0],
+      left: [-1, 0, 0],
+    };
+    this.setView(dirs[name]);
+    this.zoomExtents();
+  }
+
   /** Ask the gizmo to edit translation, rotation or scale only. */
   setGizmoMode(mode: "translate" | "rotate" | "scale"): void {
     this.gizmo.setMode(mode);
     this.#dirty = true;
+  }
+
+  /**
+   * SketchUp's three drawing styles, which are the three ways people read a
+   * model. Shaded is the default; hidden line and edges are line drawings, so
+   * they drop colour and lighting rather than tinting the same shading.
+   */
+  setStyle(style: "shaded" | "hiddenLine" | "edges"): void {
+    this.#style = style;
+    for (const c of this.#cache.values()) this.#applyStyle(c);
+    this.grid.visible = style === "shaded";
+    this.#dirty = true;
+  }
+
+  get style(): "shaded" | "hiddenLine" | "edges" {
+    return this.#style;
+  }
+
+  /** Sun shadows on or off. Off also frees the shadow-map pass. */
+  setShadows(on: boolean): void {
+    this.#shadows = on;
+    this.solar.castShadow = on;
+    this.ground.visible = on;
+    this.renderer.shadowMap.enabled = on;
+    this.renderer.shadowMap.needsUpdate = true;
+    // Every material is compiled against "uses shadows" or not; the change only
+    // takes effect after a recompile, which this forces once.
+    for (const c of this.#cache.values()) {
+      (c.mesh.material as THREE.Material).needsUpdate = true;
+      c.mesh.receiveShadow = on && !c.mesh.userData["edgeOnly"];
+    }
+    this.#dirty = true;
+  }
+
+  get shadows(): boolean {
+    return this.#shadows;
+  }
+
+  /** World axes: red/green/blue. Hidden in line styles, where they just add noise. */
+  setAxesVisible(visible: boolean): void {
+    this.#axesVisible = visible;
+    this.axes.visible = visible;
+    this.#dirty = true;
+  }
+
+  get axesVisible(): boolean {
+    return this.#axesVisible;
   }
 
   /** The gizmo follows a single selected solid; the app owns the selection. */
@@ -247,6 +394,12 @@ export class View {
   dispose(): void {
     window.removeEventListener("keydown", this.#onKeyDown);
     window.removeEventListener("keyup", this.#onKeyUp);
+    // The pointerup listener is on window: leaving it behind would keep a
+    // disposed view alive and end every drag in a stale closure.
+    window.removeEventListener("pointerup", this.#onPointerUp);
+    this.gizmo.getHelper().removeFromParent();
+    this.controls.dispose();
+    this.gizmo.dispose();
     this.#resizeObserver.disconnect();
     for (const c of this.#cache.values()) this.#disposeCache(c);
     this.renderer.dispose();
@@ -369,27 +522,66 @@ export class View {
     this.#dirty = true;
   }
 
-  #applyMeta(c: CachedMesh, solid: Solid): void {    c.mesh.name = solid.meta.name;
+  #applyMeta(c: CachedMesh, solid: Solid): void {
+    c.mesh.name = solid.meta.name;
     c.baseColor.set(solid.meta.color);
     const mat = c.mesh.material as THREE.MeshStandardMaterial;
     mat.color.copy(c.baseColor);
+    // Finish: roughness and metal come straight from the solid, so a brushed
+    // steel panel reads as metal in the shaded style without a texture.
+    mat.roughness = solid.meta.roughness;
+    mat.metalness = solid.meta.metallic;
     // Translucent geometry must not write depth, or it hides the edges of
     // whatever sits behind it and looks like a hole rather than glass.
     const opaque = solid.meta.opacity >= 1;
     mat.transparent = !opaque;
     mat.opacity = solid.meta.opacity;
     mat.depthWrite = opaque;
-    c.mesh.castShadow = opaque;
-    c.mesh.visible = !solid.meta.hidden;
-    c.edges.visible = !solid.meta.hidden;
+    c.mesh.castShadow = opaque && this.#shadows && this.#style !== "edges";
+    c.mesh.visible = !solid.meta.hidden && this.#style !== "edges";
+    c.edges.visible = !solid.meta.hidden && this.#style !== "shaded";
+    this.#applyStyle(c, solid);
+  }
+
+  /**
+   * Per-solid look for the current style. Hidden line and edges drop the
+   * colour fill; the mesh stays in the scene (invisible) so picking and the
+   * gizmo keep working while only the outline is drawn.
+   */
+  #applyStyle(c: CachedMesh, solid?: Solid): void {
+    const mat = c.mesh.material as THREE.MeshStandardMaterial;
+    const hidden = solid ? solid.meta.hidden : false;
+    if (this.#style === "shaded") {
+      mat.color.copy(c.baseColor);
+      mat.visible = true;
+      c.edges.visible = !hidden;
+      c.mesh.visible = !hidden;
+      c.mesh.castShadow = this.#shadows;
+      c.mesh.receiveShadow = this.#shadows;
+      c.mesh.userData["edgeOnly"] = false;
+      (c.edges.material as THREE.LineBasicMaterial).color.set(0x2a2a2a);
+      (c.edges.material as THREE.LineBasicMaterial).opacity = 0.55;
+      return;
+    }
+    // Both line styles draw white faces (or none) with black edges, and shadows
+    // would betray a face that is meant to read as paper.
+    mat.color.set(0xffffff);
+    mat.visible = this.#style === "hiddenLine";
+    c.edges.visible = !hidden;
+    c.mesh.visible = true;
+    c.mesh.castShadow = false;
+    c.mesh.receiveShadow = false;
+    c.mesh.userData["edgeOnly"] = true;
+    (c.edges.material as THREE.LineBasicMaterial).color.set(0x111111);
+    (c.edges.material as THREE.LineBasicMaterial).opacity = 1;
   }
 
   #build(solid: Solid): CachedMesh {
     const geometry = toBufferGeometry(this.#session.meshOf(solid.id));
     const material = new THREE.MeshStandardMaterial({
       color: new THREE.Color(solid.meta.color),
-      roughness: 0.72,
-      metalness: 0.02,
+      roughness: solid.meta.roughness,
+      metalness: solid.meta.metallic,
       flatShading: true,
     });
     const mesh = new THREE.Mesh(geometry, material);
@@ -437,7 +629,7 @@ export class View {
 
   /* ------------------------------------------------------------ scaffold */
 
-  #buildEnvironment(): { grid: THREE.GridHelper; axes: THREE.AxesHelper } {
+  #buildEnvironment(): { grid: THREE.GridHelper; axes: THREE.AxesHelper; sun: THREE.DirectionalLight; ground: THREE.Mesh } {
     const hemi = new THREE.HemisphereLight("#dfe8f2", "#2b2a28", 1.6);
     this.scene.add(hemi);
     const sun = new THREE.DirectionalLight("#fff5e6", 2.2);
@@ -463,7 +655,7 @@ export class View {
     ground.receiveShadow = true;
     ground.raycast = () => {};
     this.scene.add(ground);
-    return { grid, axes };
+    return { grid, axes, sun, ground };
   }
 
   #resize(container: HTMLElement): void {
@@ -472,10 +664,15 @@ export class View {
     if (w === 0 || h === 0) return;
     this.renderer.setSize(w, h);
     const aspect = w / h;
-    const half = Math.abs(this.camera.top);
-    this.camera.left = -half * aspect;
-    this.camera.right = half * aspect;
-    this.camera.updateProjectionMatrix();
+    const cam = this.camera;
+    if (cam instanceof THREE.PerspectiveCamera) {
+      cam.aspect = aspect;
+    } else {
+      const half = Math.abs(cam.top);
+      cam.left = -half * aspect;
+      cam.right = half * aspect;
+    }
+    cam.updateProjectionMatrix();
     this.#dirty = true;
   }
 
@@ -483,8 +680,8 @@ export class View {
 
   #onKeyDown = (e: KeyboardEvent): void => {
     if (e.key === "Shift") this.#shift = true;
-    if ((e.target as HTMLElement | null)?.tagName === "INPUT") return;
-    if (e.key.toLowerCase() === "z" && !e.ctrlKey && !e.metaKey) this.zoomExtents();
+    // Only the modifier is tracked here: every command, Z included, is routed
+    // through the app's generated shortcut table so there is one key map.
   };
 
   #onKeyUp = (e: KeyboardEvent): void => {
@@ -524,6 +721,8 @@ export class View {
   screenBox(id: SolidId): ScreenBox | null {
     const b = this.#session.boundsOf(id);
     const r = this.renderer.domElement.getBoundingClientRect();
+    // In orthographic there is no "behind the camera" for a corner in front of
+    // the near plane, but a box straddling it must still be rejected.
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -534,7 +733,9 @@ export class View {
         i & 2 ? b.max[1] : b.min[1],
         i & 4 ? b.max[2] : b.min[2],
       );
-      // Behind the camera (or on the near plane) is not a visible point.
+      // Orthographic projection turns everything in front of the near plane
+      // around, so a corner behind the camera would project to a mirrored
+      // place. There is no image of such a corner to drag over.
       const depth = corner.clone().applyMatrix4(this.camera.matrixWorldInverse).z;
       if (depth > -this.camera.near) return null;
       corner.project(this.camera);

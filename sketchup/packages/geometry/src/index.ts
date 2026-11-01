@@ -378,3 +378,4 @@ export * from "./io.js";
 export * from "./units.js";
 export * from "./inference.js";
 export * from "./rings.js";
+export * from "./lathe.js";

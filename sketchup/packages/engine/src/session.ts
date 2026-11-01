@@ -12,8 +12,9 @@ import { analyseMesh, baseMesh, isStandaloneRecipe, recipeMesh, type SolidGeomet
 import { emptyDocumentState } from "./commands.js";
 import type { Command, CommandContext } from "./command.js";
 import { checkFit, type FitResult } from "./fit.js";
+import { diffSolids, type SolidDiff } from "./change.js";
 import { History, applyPatch, type Patch } from "./history.js";
-import { applyMatrix4, isIdentity4 } from "./math.js";
+import { applyMatrix4, identity4, invertAffine4, isIdentity4, multiply4 } from "./math.js";
 import { validateRecipe as normaliseRecipe } from "./io.js";
 import type { DocumentState, Solid, SolidId, SolidRecipe } from "./types.js";
 
@@ -23,6 +24,30 @@ export type KernelResolver = (
   resolve: (r: SolidRecipe) => MeshData,
 ) => MeshData;
 
+/**
+ * The ids a recipe points at, in one place. Used for cycle checks, for deciding
+ * which dependents went stale, and for "cannot delete while referenced".
+ */
+export function refsOf(recipe: SolidRecipe): readonly SolidId[] {
+  switch (recipe.kind) {
+    case "boolean":
+      return [recipe.a, recipe.b];
+    case "transform":
+      return [recipe.child];
+    case "instance":
+      return [recipe.source];
+    default:
+      return [];
+  }
+}
+
+function requireRef(doc: DocumentState, recipe: SolidRecipe, id: SolidId, seen: Set<SolidId>): Solid {
+  if (seen.has(id)) throw new Error(`solid ${id} is its own ancestor`);
+  const solid = doc.solids.get(id);
+  if (!solid) throw new Error(`${recipe.kind} references missing solid ${id}`);
+  return solid;
+}
+
 export interface SessionOptions {
   /** Handles boolean recipes. Without one, boolean commands throw. */
   readonly kernel?: KernelResolver;
@@ -31,29 +56,36 @@ export interface SessionOptions {
   readonly cacheLimit?: number;
 }
 
-export type ChangeKind = "add" | "remove" | "update" | "envelope" | "undo" | "redo" | "load";
+export type ChangeKind = "add" | "remove" | "update" | "envelope" | "section" | "undo" | "redo" | "load";
 
-export interface SessionChange {
+/**
+ * What one commit did. `added`/`updated`/`removed` come from comparing the
+ * document before and after, so the app can reconcile exactly the solids that
+ * moved instead of redrawing the world.
+ */
+export interface SessionChange extends SolidDiff {
   readonly kind: ChangeKind;
-  /** Ids whose content changed (additions, edits, deletions). A hint, not a full list. */
+  /** Every id involved, additions, edits and deletions together. */
   readonly touched: readonly SolidId[];
   readonly label: string;
 }
 
-function classifyCommand(kind: string): ChangeKind {
-  switch (kind) {
-    case "addSolid":
-    case "duplicateSolid":
-    case "arrayCopy":
-    case "booleanSolids":
-      return "add";
-    case "deleteSolids":
-      return "remove";
-    case "setEnvelope":
-      return "envelope";
-    default:
-      return "update";
-  }
+/** Derive the coarse `kind` from what actually happened. */
+function classifyCommand(kind: string, diff: SolidDiff): ChangeKind {
+  if (kind === "setEnvelope") return "envelope";
+  if (kind === "setSection") return "section";
+  if (diff.added.length > 0 && diff.updated.length === 0) return "add";
+  if (diff.removed.length > 0 && diff.added.length === 0 && diff.updated.length === 0) return "remove";
+  return "update";
+}
+
+function changeOf(kind: ChangeKind, diff: SolidDiff, label: string): SessionChange {
+  return {
+    kind,
+    ...diff,
+    touched: [...diff.added, ...diff.updated, ...diff.removed],
+    label,
+  };
 }
 
 interface CachedAnalysis {
@@ -125,17 +157,9 @@ export class Session {
 
   /** Resolve a recipe to a world-space mesh. */
   resolve = (recipe: SolidRecipe): MeshData => {
-    if (isStandaloneRecipe(recipe)) return recipeMesh(recipe);
-    const m = recipe.matrix;
-    if (recipe.kind === "transform") {
-      const child = this.#doc.solids.get(recipe.child);
-      if (!child) throw new Error(`transform references missing solid ${recipe.child}`);
-      return applyMatrix4(this.resolve(child.recipe), m);
-    }
-    if (recipe.kind === "boolean") return this.#booleanMesh(this.#patchBase ?? this.#doc, recipe, this.resolve);
-    // Exhaustive; keeps the compiler honest if a recipe kind is added.
-    const mesh = baseMesh(recipe);
-    return isIdentity4(m) ? mesh : applyMatrix4(mesh, m);
+    // Straight to the deep path: `transform` and `instance` nest, and a copy of
+    // a copy must resolve to the same mesh as the original moved twice.
+    return this.#resolveDeep(this.#patchBase ?? this.#doc, recipe, new Set());
   };
 
   /** Resolve a boolean by id against a given document. Kernel hook point. */
@@ -158,7 +182,11 @@ export class Session {
 
   /** Run one command under the patch base so intra-patch references work. */
   #apply(command: Command, doc: DocumentState): Patch {
-    return this.#applyWith(command, doc, this.#ctx());
+    return this.#applyWith(command, doc, {
+      nextId: () => `${this.#prefix}${++this.#counter}`,
+      resolve: this.resolve,
+      resolveWith: (recipe, solids) => this.#resolveDeep({ ...doc, solids }, recipe, new Set()),
+    });
   }
 
   #applyWith(command: Command, doc: DocumentState, ctx: CommandContext): Patch {
@@ -174,11 +202,13 @@ export class Session {
   /* ------------------------------------------------------------ mutations */
 
   execute(command: Command): Patch {
+    const before = this.#doc.solids;
     const patch = this.#apply(command, this.#doc);
     this.#doc = applyPatch(this.#doc, patch, "forward");
     this.#history.push({ label: patch.label, patch });
     this.#invalidate(patch);
-    this.#emit({ kind: classifyCommand(command.kind), touched: [...patch.forward.keys(), ...patch.backward.keys()], label: patch.label });
+    const diff = diffSolids(before, this.#doc.solids);
+    this.#emit(changeOf(classifyCommand(command.kind, diff), diff, patch.label));
     return patch;
   }
 
@@ -187,6 +217,7 @@ export class Session {
    * throws, the document, the id counter and the history are untouched.
    */
   batch(commands: readonly Command[]): Patch {
+    const before = this.#doc.solids;
     if (commands.length === 0) {
       return { forward: new Map(), backward: new Map(), envelopeBefore: this.#doc.envelope, envelopeAfter: this.#doc.envelope, label: "No change" };
     }
@@ -198,6 +229,7 @@ export class Session {
       const ctx: CommandContext = {
         nextId: () => `${this.#prefix}${++counter}`,
         resolve: (recipe) => this.#resolveAgainst(working, recipe),
+        resolveWith: (recipe, solids) => this.#resolveDeep({ ...working, solids }, recipe, new Set()),
       };
       working = applyPatch(working, this.#applyWith(command, working, ctx), "forward");
       label = label ? `${label} + ${command.label}` : command.label;
@@ -227,25 +259,28 @@ export class Session {
     this.#doc = working;
     this.#history.push({ label, patch });
     this.#invalidate(patch);
-    this.#emit({ kind: "update", touched: [...forward.keys()], label });
+    const diff = diffSolids(before, working.solids);
+    this.#emit(changeOf(classifyCommand("batch", diff), diff, label));
     return patch;
   }
 
   undo(): boolean {
     const entry = this.#history.takeUndo();
     if (!entry) return false;
+    const before = this.#doc.solids;
     this.#doc = applyPatch(this.#doc, entry.patch, "backward");
     this.#invalidate(entry.patch);
-    this.#emit({ kind: "undo", touched: [], label: entry.label });
+    this.#emit(changeOf("undo", diffSolids(before, this.#doc.solids), entry.label));
     return true;
   }
 
   redo(): boolean {
     const entry = this.#history.takeRedo();
     if (!entry) return false;
+    const before = this.#doc.solids;
     this.#doc = applyPatch(this.#doc, entry.patch, "forward");
     this.#invalidate(entry.patch);
-    this.#emit({ kind: "redo", touched: [], label: entry.label });
+    this.#emit(changeOf("redo", diffSolids(before, this.#doc.solids), entry.label));
     return true;
   }
 
@@ -262,7 +297,7 @@ export class Session {
     });
     this.#counter = Math.max(this.#counter, ...used, 0);
     for (const solid of doc.solids.values()) this.#analyse(solid.id);
-    this.#emit({ kind: "load", touched: [...doc.solids.keys()], label: "Open" });
+    this.#emit(changeOf("load", diffSolids(new Map(), doc.solids), "Open"));
   }
 
   /* ------------------------------------------------------------- analysis */
@@ -360,15 +395,41 @@ export class Session {
 
   /** Resolve a recipe against an arbitrary document (used by `batch`). */
   #resolveAgainst(doc: DocumentState, recipe: SolidRecipe): MeshData {
-    if (doc === this.#doc) return this.resolve(recipe);
-    if (isStandaloneRecipe(recipe)) return recipeMesh(recipe);
+    return this.#resolveDeep(doc, recipe, new Set());
+  }
+
+  /**
+   * Resolve with cycle detection. Recipes may reference each other any depth
+   * (an instance of a boolean of an instance), and a corrupt file could point
+   * them in a ring; that must be an error with a name in it, never a hang.
+   */
+  #resolveDeep(doc: DocumentState, recipe: SolidRecipe, seen: Set<SolidId>): MeshData {
+    // Archive wrappers place their child; only the leaf carries real geometry.
+    // Resolving a wrapper to `baseMesh(wrapper)` would silently drop the child,
+    // which is how an instance of a pinned copy lost its 200 mm offset.
     if (recipe.kind === "transform") {
-      const child = doc.solids.get(recipe.child);
-      if (!child) throw new Error(`transform references missing solid ${recipe.child}`);
-      return applyMatrix4(this.#resolveAgainst(doc, child.recipe), recipe.matrix);
+      return applyMatrix4(this.#resolveDeep(doc, requireRef(doc, recipe, recipe.child, seen).recipe, seen), recipe.matrix);
     }
-    if (recipe.kind === "boolean") return this.#booleanMesh(doc, recipe, (r) => this.#resolveAgainst(doc, r));
-    return applyMatrix4(baseMesh(recipe), recipe.matrix);
+    if (recipe.kind === "instance") {
+      // `origin` is the placement the source had inside its own recipe when this
+      // instance was made. The source's resolved mesh already carries it, so the
+      // inverse is applied *inside* the source's matrix, not after it: the
+      // instance then reads as "the source's shape, offset from here".
+      const child = requireRef(doc, recipe, recipe.source, seen);
+      const seen2 = new Set(seen).add(recipe.source);
+      const childMatrix = child.recipe.matrix ?? identity4();
+      const origin = recipe.origin ?? childMatrix;
+      const stripped: SolidRecipe = { ...child.recipe, matrix: multiply4(invertAffine4(origin), childMatrix) };
+      const mesh = this.#resolveDeep(doc, stripped, seen2);
+      return applyMatrix4(mesh, recipe.matrix);
+    }
+    if (recipe.kind === "boolean") {
+      return this.#booleanMesh(doc, recipe, (r) => this.#resolveDeep(doc, r, seen));
+    }
+    if (recipe.matrix && !isIdentity4(recipe.matrix)) {
+      return applyMatrix4(baseMesh(recipe), recipe.matrix);
+    }
+    return recipeMesh(recipe);
   }
 
   #analyse(id: SolidId): SolidGeometry {
@@ -389,15 +450,26 @@ export class Session {
   #invalidate(patch: Patch): void {
     const touched = new Set([...patch.forward.keys(), ...patch.backward.keys()]);
     for (const id of touched) this.#cache.delete(id);
-    // Dependents (booleans/transforms referring to a touched solid) may be stale too.
-    const doc = this.#doc;
-    for (const solid of doc.solids.values()) {
-      const r = solid.recipe;
-      if (r.kind === "boolean" && (touched.has(r.a) || touched.has(r.b))) this.#cache.delete(solid.id);
-      if (r.kind === "transform" && touched.has(r.child)) this.#cache.delete(solid.id);
+    // Dependents are found by walking references, not one level deep: a boolean
+    // of a transform of a moved solid is stale too, and any depth is legal.
+    // Track which ids went *away* so a dangling reference is skipped, not thrown.
+    const gone = new Set<SolidId>();
+    for (const removed of patch.removed ?? []) gone.add(removed);
+    const stale = new Set<SolidId>(touched);
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const solid of this.#doc.solids.values()) {
+        if (stale.has(solid.id)) continue;
+        const refs = refsOf(solid.recipe);
+        if (refs.some((ref) => stale.has(ref) && !gone.has(ref))) {
+          stale.add(solid.id);
+          this.#cache.delete(solid.id);
+          changed = true;
+        }
+      }
     }
     this.#fit = null;
-    for (const id of doc.solids.keys()) {
+    for (const id of this.#doc.solids.keys()) {
       try {
         this.#analyse(id);
       } catch {
