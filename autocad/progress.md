@@ -3,6 +3,30 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-02 (A-02: dimensions you can type into)
+
+Done
+- Clicking a linear/aligned dimension opens a value prompt (`openDimensionEdit`,
+  one entry point for the mouse and the test surface); typing `600` runs
+  `driveDimension` as a single undo step.
+- `render.ts`: constraint glyphs drawn over the drawing - a green badge
+  (a boxed "400 mm") on every driving dimension, red and "unattached" when the
+  dimension no longer sits on geometry. Dimension text now patches with the
+  paper colour, so it reads on white paper space too.
+- `window.draftcheckTest`: `editDimension(id, text)` and `glyphs()`, and
+  `clickAt` now goes through the same pick-then-open-edit path as the mouse.
+- `scripts/ui-smoke.mjs`: five A-02 checks (prompt opens, geometry lands on the
+  number, one undo step, a refused value leaves the drawing byte-identical and
+  says why, glyphs present). 27 checks, all PASS.
+- Gate green: PASS typecheck, typecheck-app, tests, smoke, ui.
+
+Notes for the next session
+- The glyph overlay is derived every frame from the document
+  (`constraintGlyphs`), so it can never disagree with the drawing; a new
+  constraint kind only needs a line there.
+- `driveDimension` refuses a value <= 0 and reports a problem instead of moving
+  anything; the UI shows the problem in the hint and status bar.
+
 ## Cycle 2026-11-02 (A-01: the app shell)
 
 Done

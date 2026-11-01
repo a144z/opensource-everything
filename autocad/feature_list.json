@@ -103,7 +103,7 @@
         "the edit is one undo step",
         "constraint glyphs are drawn next to the geometry they hold"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "A-03",

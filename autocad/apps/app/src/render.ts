@@ -31,6 +31,8 @@ export interface DrawOptions {
   readonly rubber: readonly Pt[];
   readonly showGrid: boolean;
   readonly layerColors: boolean;
+  /** Constraint glyphs to draw over the geometry they hold. */
+  readonly constraints?: readonly { text: string; at: Pt; bad?: boolean }[];
 }
 
 const PAPER_BG = "#0d1117";
@@ -59,6 +61,9 @@ export function drawScene(ctx: CanvasRenderingContext2D, cam: Camera, doc: Docum
     if (opts.selection.has(id)) ctx.strokeStyle = SELECT;
     else if (opts.hover === id) ctx.strokeStyle = HOVER;
     else ctx.strokeStyle = style.color;
+    // Dimension text is painted over an opaque patch sized to the view, so it
+    // must be filled with the paper, not the fixed screen background.
+    if (e.kind === "dimension") ctx.fillStyle = doc.paper ? "#f6f4ee" : "#0d1117";
     if (opts.selection.has(id) || opts.hover === id) ctx.lineWidth = Math.max(style.width + 1.2, 2);
     else ctx.lineWidth = style.width;
     ctx.setLineDash(style.dash.map((d) => Math.max(1, d * cam.unit)));
@@ -85,6 +90,33 @@ export function drawScene(ctx: CanvasRenderingContext2D, cam: Camera, doc: Docum
   }
   if (opts.snap) drawSnapMark(ctx, opts.snap.client, opts.snap.label);
   if (doc.paper) drawPaperFrame(ctx, cam, doc);
+  for (const g of opts.constraints ?? []) drawConstraintGlyph(ctx, cam.toScreen(g.at), g.text, g.bad === true);
+}
+
+/**
+ * A constraint glyph: a small rounded badge pinned to the point it holds.
+ * Drawn after the drawing so a white line can never hide the mark that says
+ * why this corner is not free.
+ */
+function drawConstraintGlyph(ctx: CanvasRenderingContext2D, s: Pt, text: string, bad: boolean): void {
+  ctx.save();
+  ctx.font = "10px \"Segoe UI\", sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const w = ctx.measureText(text).width + 10;
+  const h = 15;
+  const x = s.x + 10;
+  const y = s.y - 18;
+  ctx.fillStyle = bad ? "#5a1f1f" : "#1d2b1f";
+  ctx.strokeStyle = bad ? "#ff6b6b" : "#6fcf7f";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(x - w / 2, y - h / 2, w, h, 4);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = bad ? "#ffb3b3" : "#b7f0c0";
+  ctx.fillText(text, x, y);
+  ctx.restore();
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, cam: Camera, paper: boolean): void {
@@ -371,7 +403,6 @@ function drawDimension(ctx: CanvasRenderingContext2D, cam: Camera, doc: Document
   ctx.rotate(-angle);
   // A text gap in the dimension line reads as a label without erasing the line
   // underneath (the paper background is opaque on screen and in the plot).
-  ctx.fillStyle = "#0d1117";
   ctx.globalAlpha = 0.9;
   ctx.fillRect(-w / 2 - 2, -e.textHeight * cam.unit * 0.6, w + 4, e.textHeight * cam.unit * 1.2);
   ctx.globalAlpha = 1;

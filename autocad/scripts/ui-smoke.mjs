@@ -240,6 +240,76 @@ const dimensionProbe = `
   return { skipped: false, drive, before, after, dim: dim.id };
 })()`;
 
+/**
+ * A-02, the user's gesture: click the dimension, type the value. Four things
+ * have to hold — the geometry lands on the number, the number is one undo
+ * step, an impossible value keeps the drawing and says so, and every driving
+ * dimension has a glyph beside it.
+ */
+const dimensionEditProbe = `
+(() => {
+  const t = window.draftcheckTest;
+  if (!t) return { skipped: true };
+  t.command('new');
+  t.command('new');
+  t.command('rect');
+  t.command('0,0');
+  t.command('400,300');
+  t.command('dimlinear');
+  t.command('0,300');
+  t.command('400,300');
+  t.command('200,400');
+  const dim = [...t.doc().entities.values()].find((e) => e.kind === 'dimension');
+  if (!dim) return { skipped: false, dim: null };
+  const poly = () => [...t.doc().entities.values()].find((e) => e.kind === 'polyline');
+  const xs = () => {
+    const p = poly();
+    return p ? p.points.map((q) => q.x) : [];
+  };
+  const width = () => { const a = xs(); return a.length ? Math.max(...a) - Math.min(...a) : 0; };
+
+  const glyphsBefore = t.glyphs().length;
+
+  // Click the dimension text (it sits above the edge at 200,400), then type.
+  t.clickAt(200, 400);
+  const prompt = document.getElementById('prompt-label').textContent;
+  t.command('600');
+  const afterType = width();
+
+  const history = t.doc && t.version();  const undo = t.app.undo();
+  const afterUndo = width();
+  const redo = t.app.redo();
+  const afterRedo = width();
+
+  // Impossible: the second extension line points at a corner the solve cannot
+  // reach if we detach it — drive to a negative value instead, which is refused.
+  const before = t.dump();
+  const hint = t.editDimension(dim.id, '-50');
+  const unchanged = t.dump() === before;
+  const glyphWeird = t.editDimension(dim.id, 'nothing');
+  const stillUnchanged = t.dump() === before;
+
+  return {
+    skipped: false,
+    prompt,
+    afterType,
+    history,
+    undo,
+    afterUndo,
+    redo,
+    afterRedo,
+    /* one undo step: a single undo restores the pre-edit width */
+    undoWentBack: Math.abs(afterUndo - 400) < 1e-6,
+    hint,
+    unchanged,
+    glyphWeird,
+    stillUnchanged,
+    glyphsBefore,
+    glyphsAfter: t.glyphs().length,
+    glyphText: t.glyphs().map((g) => g.text),
+  };
+})()`;
+
 /** Layers: create through the panel input, rename through the test surface. */
 const layerProbe = `
 (() => {
@@ -387,6 +457,16 @@ try {
 
   const dim = await evaluate(api, dimensionProbe);
   checks.push(["a typed dimension drives the geometry", dim.skipped || (dim.drive === "ok" && Math.abs(dim.after - 600) < 0.5), JSON.stringify(dim)]);
+  const edit = await evaluate(api, dimensionEditProbe);
+  if (edit.skipped) {
+    checks.push(["click a dimension and type the value", false, "no test surface"]);
+  } else {
+    checks.push(["a dimension click opens the value prompt", /new value/i.test(edit.prompt ?? ""), edit.prompt]);
+    checks.push(["typing the value moves the geometry to it", Math.abs(edit.afterType - 600) < 0.5, edit.afterType]);
+    checks.push(["the edit is one undo step", edit.undoWentBack && Math.abs(edit.afterRedo - 600) < 0.5, JSON.stringify(edit)]);
+    checks.push(["an impossible value keeps the drawing and says why", edit.unchanged && edit.stillUnchanged && /greater than zero/i.test(edit.hint ?? ""), JSON.stringify(edit)]);
+    checks.push(["constraint glyphs sit next to driving dimensions", edit.glyphsBefore >= 1 && edit.glyphsAfter >= 1 && edit.glyphText.every((s) => /▣/.test(s)), JSON.stringify(edit.glyphText)]);
+  }
 
   const layers = await evaluate(api, layerProbe);
   checks.push(["the panel adds a layer", layers.after === layers.before + 1, JSON.stringify(layers)]);

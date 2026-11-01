@@ -4,9 +4,11 @@ import {
   SCHEMA_VERSION,
   boundsExpand,
   dist,
+  dimensionTargets,
   drawingBounds,
   driveDimension,
   emptyDocument,
+  entityVisible,
   eraseEntities,
   formatLength,
   layerByName,
@@ -238,9 +240,31 @@ function redraw(): void {
       rubber: box ? [box.from, box.to] : runner.trail,
       showGrid: app.settings.showGrid,
       layerColors: app.settings.layerColors,
+      constraints: constraintGlyphs(),
     });
     setStatus();
   });
+}
+
+/**
+ * The driving dimensions of this drawing, as badges next to the edge they hold.
+ * A bad one (no geometry under it, or a value the solver refused) is red: the
+ * glyph is how a drafter sees which number owns which corner without clicking.
+ */
+function constraintGlyphs(): { text: string; at: Pt; bad: boolean }[] {
+  const out: { text: string; at: Pt; bad: boolean }[] = [];
+  for (const e of app.doc.entities.values()) {
+    if (e.kind !== "dimension") continue;
+    if (e.dim !== "linear" && e.dim !== "aligned") continue;
+    if (!entityVisible(app.doc, e)) continue;
+    const attached = dimensionTargets(app.doc, e.id).length >= 2;
+    out.push({
+      text: attached ? `▣ ${formatLength(measureDimension(app.doc, e).value, app.doc.units)}` : "▣ unattached",
+      at: e.p2,
+      bad: !attached,
+    });
+  }
+  return out;
 }
 
 /** The point a rubber band starts from, for `dist<angle` typed input. */
@@ -301,16 +325,7 @@ canvas.addEventListener("mousedown", (e) => {
   const hit = pickEntity(app.doc, p, cam.mm(8));
   if (hit) {
     const id = hit.id;
-    const entity = app.doc.entities.get(id);
-    if (entity?.kind === "dimension" && (entity.dim === "linear" || entity.dim === "aligned")) {
-      editing = id;
-      setPromptLabel(`New value for ${measureDimension(app.doc, entity).label}`);
-      input.value = "";
-      input.placeholder = "Type the new measurement, Enter to apply, Esc to cancel";
-      focusCommand();
-      app.select([id]);
-      return;
-    }
+    if (openDimensionEdit(id)) return;
     const sel = app.session.selection;
     if (e.shiftKey) app.select(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
     else app.select([id]);
@@ -488,6 +503,23 @@ function parseDistance(text: string): number | null {
   const factors: Record<string, number> = { "": 1, mm: 1, cm: 10, m: 1000, in: 25.4, '"': 25.4, ft: 304.8, "'": 304.8 };
   const f = factors[unitText];
   return f === undefined || !Number.isFinite(raw) ? null : raw * f;
+}
+
+/**
+ * Clicking a linear or aligned dimension starts the "type the new value" prompt
+ * instead of selecting it. One entry point, so the mouse, the test surface and
+ * a future DIMEDIT command all open the same edit.
+ */
+function openDimensionEdit(id: EntityId): boolean {
+  const entity = app.doc.entities.get(id);
+  if (!entity || entity.kind !== "dimension" || (entity.dim !== "linear" && entity.dim !== "aligned")) return false;
+  editing = id;
+  setPromptLabel(`New value for ${measureDimension(app.doc, entity).label}`);
+  input.value = "";
+  input.placeholder = "Type the new measurement, Enter to apply, Esc to cancel";
+  focusCommand();
+  app.select([id]);
+  return true;
 }
 
 function applyDimensionValue(dimId: string, text: string): void {
@@ -931,6 +963,9 @@ interface TestSurface {
   plot(scale: number): Promise<boolean>;
   hint(): string;
   pickAt(x: number, y: number): string | null;
+  /** Open a dimension's value prompt and answer it, as a click then a type. */
+  editDimension(dimId: string, text: string): string;
+  glyphs(): { text: string; at: Pt; bad: boolean }[];
 }
 declare global {
   interface Window {
@@ -952,11 +987,21 @@ window.draftcheckTest = {
     if (prompt) runner.answer({ point: prompt.kind === "point" ? p : p, text: "", byClick: true });
     else {
       const hit = pickEntity(app.doc, p, cam.mm(8));
-      if (hit) app.select(opts?.shift ? [...app.session.selection, hit.id] : [hit.id]);
+      // Same two-step as the real mouse: a dimension click opens its edit, an
+      // entity click selects it.
+      if (hit && openDimensionEdit(hit.id)) {
+        // A dimension click opened the value prompt; nothing else to do.
+      } else if (hit) app.select(opts?.shift ? [...app.session.selection, hit.id] : [hit.id]);
       else app.select([]);
     }
     redraw();
   },
+  editDimension: (dimId, text) => {
+    if (!openDimensionEdit(dimId)) return "not a driving dimension";
+    submit(text);
+    return hintEl.textContent ?? "";
+  },
+  glyphs: () => constraintGlyphs(),
   zoomExtents,
   doc: () => app.doc,
   version: () => app.version,
