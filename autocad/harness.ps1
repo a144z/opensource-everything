@@ -1,4 +1,4 @@
-﻿# The harness gate for the Apexus CAD product.
+# The harness gate for the Apexus CAD product.
 #
 # Written for an agent, not a human: terse one-line results, full detail in
 # .harness/logs/, one greppable marker (ERROR) so the next step is always
@@ -83,15 +83,26 @@ switch ($Command.ToLower()) {
     if ($failed -gt 0) { exit 1 }
   }
   "verify" {
-    $steps = if ($Step) { @($Step) } else { @("typecheck", "tests", "smoke") }
+    $steps = if ($Step) { @($Step) } else { @("typecheck", "typecheck-app", "tests", "smoke", "ui") }
     $failed = 0
     foreach ($s in $steps) {
       switch ($s.ToLower()) {
         "typecheck" { Invoke-Step "typecheck" { & "$Root\..\sketchup\node_modules\.bin\tsc.cmd" -p "$Root\tsconfig.json" --noEmit } }
         # --reporter=json keeps the console quiet; the summary is the status file.
         "tests" { Invoke-Step "tests" { & "$Root\..\sketchup\node_modules\.bin\vitest.cmd" run --root $Root --reporter=default } }
+        "typecheck-app" { Invoke-Step "typecheck-app" { & "$Root\..\sketchup\node_modules\.bin\tsc.cmd" -p "$Root\apps\app\tsconfig.json" --noEmit } }
         "smoke" { Invoke-Step "smoke" { node scripts/smoke.mjs } }
-        default { throw "unknown step '$s' (typecheck | tests | smoke)" }
+        # The UI step serves `dist`, so it builds first: a smoke test of a stale
+        # bundle passes against code nobody is running.
+        "ui" {
+          Invoke-Step "ui" {
+            Push-Location "$Root\apps\app"
+            try { node node_modules\vite\bin\vite.js build; if ($LASTEXITCODE -ne 0) { throw "vite build failed" } }
+            finally { Pop-Location }
+            node scripts/ui-smoke.mjs
+          }
+        }
+        default { throw "unknown step '$s' (typecheck | typecheck-app | tests | smoke | ui)" }
       }
       if ((Get-Content (Join-Path $Logs "$s.status")) -ne "PASS") { $failed++ }
     }

@@ -237,48 +237,53 @@ describe("constraint solver", () => {
     const kept = out.doc.entities.get(id) as Extract<C.Entity, { kind: "line" }>;
     expect(kept.b.x).toBeCloseTo(100.0001, 4);
   });
-  it("a driving dimension moves geometry to the parameter", () => {
+  it("a typed dimension stretches the rectangle edge it measures", () => {
+    const s = session();
+    s.run(C.addRectangle(p(0, 0), p(400, 300)));
+    s.run(C.addDimension(p(0, 300), p(400, 300), p(200, 400), undefined, { dim: "linear" }));
+    const dim = [...s.doc.entities.values()].find((e) => e.kind === "dimension")!;
+    const drive = C.driveDimension(s.doc, dim.id, 600);
+    expect(drive.problem).toBeNull();
+    expect(drive.command).not.toBeNull();
+    s.run(drive.command!);
+    const rect = [...s.doc.entities.values()].find((e) => e.kind === "polyline")!;
+    if (rect.kind !== "polyline") throw new Error("rect");
+    expect(Math.max(...rect.points.map((q) => q.x))).toBeCloseTo(600, 6);
+    // The pivot edge (x = 0) did not move and nothing else drifted.
+    expect(Math.min(...rect.points.map((q) => q.x))).toBeCloseTo(0, 6);
+    expect(rect.points.every((q) => q.y === 0 || q.y === 300)).toBe(true);
+    expect([...s.doc.entities.values()].find((e) => e.id === dim.id)).toMatchObject({ p2: { x: 600 } });
+  });
+
+  it("a dimension on a line grows the line from its first end", () => {
+    const s = session();
+    s.run(C.addLine(p(10, 20), p(110, 20)));
+    s.run(C.addDimension(p(10, 20), p(110, 20), p(60, 50), undefined, { dim: "linear" }));
+    const dim = [...s.doc.entities.values()].find((e) => e.kind === "dimension")!;
+    s.run(C.driveDimension(s.doc, dim.id, 250).command!);
+    const line = [...s.doc.entities.values()].find((e) => e.kind === "line")!;
+    if (line.kind !== "line") throw new Error("line");
+    expect(line.a).toEqual(p(10, 20));
+    expect(line.b.x).toBeCloseTo(260, 6);
+    expect(line.b.y).toBeCloseTo(20, 6);
+  });
+
+  it("a dimension with nothing under it refuses instead of moving the world", () => {
     const s = session();
     s.run(C.addLine(p(0, 0), p(100, 0)));
-    s.run(C.setParam("W", 800));
-    const id = [...s.doc.entities.keys()][0]!;
-    const l = C.lineVars(id, 2);
-    // Probe: the projection must name a line's y:0 the same way lineVars does.
-    const probe = C.projectScene(s.doc);
-    expect(probe.vars.get(l.x0)).toBe(0);
-    expect(probe.vars.get(l.y0)).toBe(0);
-    expect(probe.vars.get(l.x1)).toBe(100);
-    expect(probe.vars.get(l.y1)).toBe(0);
-    // The start point is the grip: it is pinned, the edge is driven to W, and
-    // the line stays horizontal while it grows to the right.
-    const line0 = s.doc.entities.get(id) as Extract<C.Entity, { kind: "line" }>;
-    const anchor: C.Anchor = {
-      fixed: [],
-      constraints: [
-        ...C.pinVars([l.x0, l.y0]),
-        C.constraintFromPairs("horizontal", [l.x0, l.y0, l.x1, l.y1]),
-      ],
-      rules: [{ kind: "distance", dim: "d1", p1: l.x0, p2: l.x1, value: s.doc.params.get("W")! }],
-    };
-    const out = C.solveAnchor(s.doc, anchor);
-    expect(out.problems).toEqual([]);
-    const line = out.doc.entities.get(id) as Extract<C.Entity, { kind: "line" }>;
-    expect(C.dist(line.a, line0.a)).toBeCloseTo(0, 6);
-    expect(line.b.x).toBeCloseTo(800, 6);
-    expect(line.b.y).toBeCloseTo(0, 6);
-    expect(C.endpointVars(line0)).toEqual([l.x0, l.y0, l.x1, l.y1]);
+    s.run(C.addDimension(p(0, 500), p(100, 500), p(50, 550), undefined, { dim: "linear" }));
+    const dim = [...s.doc.entities.values()].find((e) => e.kind === "dimension")!;
+    const drive = C.driveDimension(s.doc, dim.id, 300);
+    expect(drive.command).toBeNull();
+    expect(drive.problem).toBeTruthy();
+  });
 
-    // Both ends pinned and the width still driven to 800: the drawing can no
-    // longer fit, and it has to say so rather than stretch or go NaN.
-    const impossible = C.solveAnchor(s.doc, {
-      fixed: [],
-      constraints: [...C.pinVars([l.x0, l.y0, l.x1, l.y1])],
-      rules: [{ kind: "distance", dim: "d1", p1: l.x0, p2: l.x1, value: 800 }],
-    });
-    expect(impossible.problems.length).toBeGreaterThan(0);
-    const kept = impossible.doc.entities.get(id) as Extract<C.Entity, { kind: "line" }>;
-    expect(Number.isFinite(kept.a.x) && Number.isFinite(kept.b.x)).toBe(true);
-    expect(C.dist(kept.a, kept.b)).toBeCloseTo(100, 6);
+  it("driving a dimension to zero is refused", () => {
+    const s = session();
+    s.run(C.addLine(p(0, 0), p(100, 0)));
+    s.run(C.addDimension(p(0, 0), p(100, 0), p(50, 30), undefined, { dim: "linear" }));
+    const dim = [...s.doc.entities.values()].find((e) => e.kind === "dimension")!;
+    expect(C.driveDimension(s.doc, dim.id, 0).command).toBeNull();
   });
 });
 

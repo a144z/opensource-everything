@@ -89,7 +89,7 @@
         "undo/redo in the UI walks the same history as the engine",
         "the layer panel creates, renames, locks and deletes layers with immediate redraw"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "A-02",

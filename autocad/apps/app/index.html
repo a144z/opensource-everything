@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DraftCheck</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="panel">
+        <header>
+          <h1>DraftCheck</h1>
+          <span class="ver">AutoCAD-class</span>
+        </header>
+
+        <section>
+          <h2>Draw</h2>
+          <div class="grid" id="toolbar">
+            <button data-cmd="line" title="Line (L): click, click, Esc">Line</button>
+            <button data-cmd="polyline" title="Polyline (PL): Enter ends the run">Polyline</button>
+            <button data-cmd="rect" title="Rectangle (REC)">Rect</button>
+            <button data-cmd="circle" title="Circle (C)">Circle</button>
+            <button data-cmd="arc" title="Arc (A): centre, start, end">Arc</button>
+            <button data-cmd="text" title="Text (T)">Text</button>
+            <button data-cmd="point" title="Point (PO)">Point</button>
+            <button data-cmd="dimlinear" title="Linear dimension (DLI)">Dim</button>
+            <button data-cmd="dimradius" title="Radius dimension (DRA)">Radius</button>
+            <button data-cmd="hatch" title="Hatch the selected closed polylines (H)">Hatch</button>
+            <button data-cmd="leader" title="Leader (LE)">Leader</button>
+            <button data-cmd="section" title="Section marker (SEC)">Section</button>
+            <button data-cmd="insert" title="Insert the first block definition (I)">Insert</button>
+            <button data-cmd="block" title="Make a block from the selection (B)">Block</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Modify</h2>
+          <div class="grid" id="modify">
+            <button data-cmd="select" title="Pick and window selection (Esc)">Select</button>
+            <button data-cmd="move" title="Move the selection (M)">Move</button>
+            <button data-cmd="copy" title="Copy the selection (CO)">Copy</button>
+            <button data-cmd="rotate" title="Rotate the selection (RO)">Rotate</button>
+            <button data-cmd="scale" title="Scale the selection (SC)">Scale</button>
+            <button data-cmd="mirror" title="Mirror across a line (MI)">Mirror</button>
+            <button data-cmd="offset" title="Offset a line or polyline (O)">Offset</button>
+            <button data-cmd="trim" title="Trim against a cutter (TR)">Trim</button>
+            <button data-cmd="extend" title="Extend to a target (EX)">Extend</button>
+            <button data-cmd="fillet" title="Fillet two lines (F)">Fillet</button>
+            <button data-cmd="join" title="Join selection into one polyline (J)">Join</button>
+            <button data-cmd="explode" title="Explode blocks and polylines (X)">Explode</button>
+            <button data-cmd="array" title="Rectangular array of the selection (AR)">Array</button>
+            <button data-cmd="erase" title="Erase the selection (E)">Erase</button>
+          </div>
+          <div class="row">
+            <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+            <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Layers</h2>
+          <div class="row">
+            <input id="layer-new" type="text" placeholder="New layer name" autocomplete="off" spellcheck="false" />
+            <button id="layer-add" title="Create the layer">+</button>
+          </div>
+          <ul id="layers" class="layers" aria-label="Layers"></ul>
+        </section>
+
+        <section>
+          <h2>Snaps</h2>
+          <div class="row">
+            <button id="snap-osnap" class="active" title="Object snap to endpoints, midpoints and centres (F3)">OSnap</button>
+            <button id="snap-ortho" title="Ortho: stay on the axis from the last point (F8)">Ortho</button>
+            <button id="snap-grid" class="active" title="Snap to the grid (F9)">Grid snap</button>
+            <button id="snap-polar" title="Polar tracking at 15 degrees (F10)">Polar</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>File</h2>
+          <div class="row">
+            <button id="file-new" title="New drawing">New</button>
+            <button id="file-open" title="Open a .dwgcad project">Open</button>
+            <button id="file-save" title="Save the .dwgcad project">Save</button>
+          </div>
+          <div class="row">
+            <button id="file-dxf-open" title="Open a DXF file">Open DXF</button>
+            <button id="file-dxf-save" title="Save as DXF">Save DXF</button>
+            <button id="file-svg" title="Plot the drawing to SVG">Plot SVG</button>
+          </div>
+          <div class="row">
+            <button id="zoom-extents" title="Zoom extents (Z)">Zoom extents</button>
+            <button id="paper-mode" title="Model space / paper space">Model</button>
+          </div>
+        </section>
+      </aside>
+
+      <main id="stage">
+        <canvas id="viewport"></canvas>
+        <div id="hint" aria-live="polite">Ready</div>
+        <div id="cursor" class="cursor">0, 0</div>
+        <div id="status"></div>
+      </main>
+
+      <footer id="prompt">
+        <span id="prompt-label">Command:</span>
+        <input id="command-input" type="text" placeholder="Type a command, coordinate or value" autocomplete="off" spellcheck="false" />
+      </footer>
+    </div>
+    <input id="file-input" type="file" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

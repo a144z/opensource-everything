@@ -3,6 +3,38 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-02 (A-01: the app shell)
+
+Done
+- `apps/app`: Vite + `<canvas>` shell - `state.ts` (document edit/undo/select),
+  `camera.ts` (view transform, grid step, fit), `render.ts` (all 12 entity
+  kinds, grips, paper frame), `tools.ts` (`Runner` + every tool, ~1k lines),
+  `io.ts` (project/DXF/SVG open+save), `main.ts` (wiring, command table,
+  aliases, layer panel, `window.draftcheckTest`).
+- `scripts/ui-smoke.mjs`: real Chrome over CDP, 20 checks, one per A-01
+  acceptance line. It presses the actual buttons where a button exists.
+- `harness.ps1 verify` now runs five steps and is green:
+  PASS typecheck, typecheck-app, tests, smoke, ui.
+- Engine bugs the UI smoke found and fixed:
+  - `parseXY` split `0,0` into three parts (trailing empty), so *no* typed
+    coordinate ever parsed. Filter empties.
+  - `projectScene` never projected dimension points, so `dimensionRule`'s
+    `id|p1:0` keys were always "missing" and every drive failed.
+  - `constraintsFromRules` built a distance from one coordinate per point;
+    now it uses `x,y,x,y` and `dimensionLinkConstraints` ties each end to the
+    vertex it sits on.
+  - `driveDimension` is now a plain, stated edit (pivot end holds, the other
+    end slides along the measured direction, coincident vertices travel) rather
+    than a least-norm solve that swung corners in arbitrary directions.
+
+Notes for the next session
+- `Runner.start` accepts a `Tool` or a `ToolFactory`; tools with per-gesture
+  state (`line`, `polyline`, `dimlinear`, the edit tools) are factories.
+  A new stateful tool must be one, or two gestures will share its state.
+- `apps/app/node_modules` is a junction to `sketchup/node_modules` (no install).
+- `window.draftcheckTest.command()` is the *command line*: while a tool asks,
+  a line is an answer, at idle it is a command.
+
 ## Cycle 2026-11-01 (engine core green)
 
 Done
@@ -46,7 +78,7 @@ Open bugs
 - (none known; the gate is green)
 
 Next
-1. A-01 - the app shell (`apps/app`, Vite + canvas viewport, layer panel,
-   command line). Pattern-match `../sketchup/apps/app`.
-2. A-02 - dimension editing in the UI, live solve, failure toast.
-3. A-03 - sheets and plotting from `plotTransform`.
+1. A-02 - dimension editing in the UI: click a dimension, type a value,
+   `driveDimension` runs, failure keeps the old geometry and says why.
+2. A-03 - sheets and plotting from `plotTransform` (SVG now; PDF + a desktop
+   export without the download prompt next).

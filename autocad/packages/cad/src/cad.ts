@@ -70,6 +70,19 @@ export function parseLength(text: string, defaultUnit: Unit = "mm"): ParsedLengt
   return value === null ? null : { mm: value * UNITS[defaultUnit].mm, unit: defaultUnit };
 }
 
+/**
+ * Parse a typed point `x,y` (each side may carry its own suffix: `1m,250`),
+ * or `x` plus a typed distance when only one number is given. Null otherwise.
+ */
+export function parseXY(text: string, defaultUnit: Unit = "mm"): Pt | null {
+  const parts = text.split(",").map((p) => p.trim()).filter((p) => p !== "");
+  if (parts.length !== 2) return null;
+  const x = parseLength(parts[0]!, defaultUnit);
+  const y = parseLength(parts[1]!, defaultUnit);
+  if (!x || !y) return null;
+  return { x: x.mm, y: y.mm };
+}
+
 export function toDisplay(mm: number, unit: Unit): number {
   return mm / UNITS[unit].mm;
 }
@@ -832,6 +845,25 @@ export class CadSession {
 
   get snapshot(): Session {
     return { doc: this.doc, history: this.history, selection: this.selection, hover: this.hover };
+  }
+
+  /**
+   * Load a document that did not come from this session (a DXF, a project
+   * file): history starts empty, ids carry on past what the file used, so a
+   * new entity can never collide with a loaded one.
+   */
+  load(doc: DocumentState, idPrefix = this.#idPrefix): void {
+    this.doc = doc;
+    this.history = new History();
+    this.selection = [];
+    this.hover = null;
+    this.#idPrefix = idPrefix;
+    let max = 0;
+    for (const id of doc.entities.keys()) {
+      const m = /^(\d+)$/.exec(id.startsWith(idPrefix) ? id.slice(idPrefix.length) : "");
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    this.#idSeq = max;
   }
 }
 
@@ -2227,6 +2259,15 @@ export function projectScene(doc: DocumentState): SceneProjection {
         put(e.id, "x", 0, e.at.x);
         put(e.id, "y", 0, e.at.y);
         break;
+      case "dimension":
+        // A dimension's measured points are variables too: `dimensionRule`
+        // addresses them as `id|p1` / `id|p2`, and a driving edit moves them
+        // with the geometry they sit on.
+        put(e.id, "p1", 0, e.p1.x);
+        put(e.id, "p1y", 0, e.p1.y);
+        put(e.id, "p2", 0, e.p2.x);
+        put(e.id, "p2y", 0, e.p2.y);
+        break;
       default:
         break;
     }
@@ -2598,11 +2639,73 @@ export function endpointVars(e: Entity): VarId[] {
 
 /** Turn a design rule into solver constraints. */
 export function constraintsFromRules(rulesToAdd: readonly ParamRule[]): ConstraintDef[] {
-  return rulesToAdd.map((r, i) =>
-    r.kind === "distance"
-      ? { id: `rule-${i}`, kind: "distance", vars: [r.p1, r.p2], refs: [], value: r.value, label: "dimension" }
-      : { id: `rule-${i}`, kind: "radius", vars: [r.target], refs: [], value: r.value, label: "radius" },
-  );
+  const out: ConstraintDef[] = [];
+  rulesToAdd.forEach((r, i) => {
+    if (r.kind === "radius") {
+      out.push({ id: `rule-${i}`, kind: "radius", vars: [r.target], refs: [], value: r.value, label: "radius" });
+      return;
+    }
+    // `distance` reads its two points as x0,y0,x1,y1 — a measured point needs
+    // both coordinates, or the solver only ever moves x and the y span drifts.
+    const yOf = (v: VarId): VarId => {
+      const [entity = "", slot = ""] = v.split("|");
+      return `${entity}|${slot.replace(/:.*$/, "")}y:0`;
+    };
+    out.push({ id: `rule-${i}`, kind: "distance", vars: [r.p1, yOf(r.p1), r.p2, yOf(r.p2)], refs: [], value: r.value, label: "dimension" });
+  });
+  return out;
+}
+
+/**
+ * Tie a dimension's measured points to the geometry they sit on: for each end,
+ * a coincident constraint between the dimension's own point and the nearest
+ * vertex of a target entity. Without this the solver moves the arrowheads and
+ * leaves the drawing exactly as it was.
+ */
+export function dimensionLinkConstraints(doc: DocumentState, dimId: EntityId): ConstraintDef[] {
+  const e = doc.entities.get(dimId);
+  if (!e || e.kind !== "dimension") return [];
+  const out: ConstraintDef[] = [];
+  const ends: readonly { p: Pt; vx: VarId; vy: VarId; n: number }[] = [
+    { p: e.p1, vx: varKey(e.id, "p1"), vy: varKey(e.id, "p1y"), n: 1 },
+    { p: e.p2, vx: varKey(e.id, "p2"), vy: varKey(e.id, "p2y"), n: 2 },
+  ];
+  for (const end of ends) {
+    let best: EntityId | null = null;
+    let bestVx = "";
+    let bestVy = "";
+    let bestD = Infinity;
+    for (const cand of doc.entities.values()) {
+      if (cand.kind === "dimension" || cand.id === dimId) continue;
+      if (!entityVisible(doc, cand)) continue;
+      // Only kinds whose point variables are `x:index`/`y:index` pairs: line
+      // (0-1), polyline and spline. A circle, arc or text has no such pair.
+      if (cand.kind !== "line" && cand.kind !== "polyline" && cand.kind !== "spline") continue;
+      const points = entityPoints(cand);
+      for (let index = 0; index < points.length; index++) {
+        // A rect's corners are 0-3, and a two-vertex polyline 0-1, but neither
+        // has a slot above index 1 except polylines; the polyline case is the
+        // one where the dimension measures its own segment, so allow any index.
+        const d = dist(points[index]!, end.p);
+        if (d > FIT_TOLERANCE || d >= bestD) continue;
+        bestD = d;
+        best = cand.id;
+        bestVx = varKey(cand.id, "x", index);
+        bestVy = varKey(cand.id, "y", index);
+      }
+    }
+    const link = best;
+    if (!link) continue;
+    out.push({ id: `link-${dimId}-${end.n}`, kind: "coincident", vars: [end.vx, end.vy, bestVx, bestVy], refs: [], label: "dimension link" });
+  }
+  return out;
+}
+
+/** The world position of the vertex a dimension link attaches to. */
+function entityPointAt(doc: DocumentState, at: { entity: EntityId; index: number }): Pt {
+  const e = doc.entities.get(at.entity);
+  const points = e ? entityPoints(e) : [];
+  return points[at.index] ?? pt(0, 0);
 }
 
 /**
@@ -2672,6 +2775,312 @@ export function solveAnchor(doc: DocumentState, anchor: Anchor, options: SolveOp
 export function refreshParams(doc: DocumentState): { doc: DocumentState; mismatched: readonly EntityId[] } {
   const mismatched = readDrivenParams(doc);
   return { doc, mismatched };
+}
+
+/**
+ * One command that erases `remove`, adds `create` and patches `update` — the
+ * shape every generate-new-ids edit has. Fresh ids come from the context, so a
+ * caller (*explode*, *join*, *trim*) hands over templates and the document
+ * stays the one place ids are minted.
+ */
+export function changeEntities(
+  label: string,
+  remove: readonly EntityId[],
+  create: readonly (readonly [EntityId, Entity])[],
+  update: ReadonlyMap<EntityId, Entity> = new Map(),
+): Command {
+  return {
+    kind: "changeEntities",
+    label,
+    apply(doc, ctx) {
+      const before = new Map<EntityId, Entity | null>();
+      const after = new Map<EntityId, Entity | null>();
+      for (const id of remove) {
+        const e = doc.entities.get(id);
+        if (!e) continue;
+        before.set(id, e);
+        after.set(id, null);
+      }
+      for (const [id, e] of create) {
+        if (doc.entities.has(id)) throw new Error(`changeEntities: id ${id} already exists`);
+        const fresh = ctx.nextId();
+        before.set(fresh, null);
+        after.set(fresh, { ...e, id: fresh });
+      }
+      for (const [id, e] of update) {
+        const old = doc.entities.get(id);
+        if (!old) continue;
+        before.set(id, old);
+        after.set(id, e);
+      }
+      return patchOf(before, after, label, { history: doc.history }, { history: [label, ...doc.history].slice(0, 200) });
+    },
+  };
+}
+
+/**
+ * Move geometry that a prior edit has not moved yet: unlike `moveEntities`,
+ * the commands are independent of each other, so several can be composed into
+ * one gesture without the second seeing the first's result.
+ */
+export function moveCommandsBy(ids: readonly EntityId[], by: Pt): Command {
+  return moveEntities(ids, by);
+}
+
+/** Mirror across the line through `a` and `b`; `keep` keeps the originals. */
+export function mirrorCommand(ids: readonly EntityId[], a: Pt, b: Pt, keep: boolean): Command {
+  const dir = unit(sub(b, a));
+  if (!dir) throw new RangeError("mirror line has zero length");
+  const reflect = (p: Pt): Pt => {
+    const d = sub(p, a);
+    const along = dot(d, dir);
+    const foot = add(a, scale(dir, along));
+    const perp = sub(p, foot);
+    const r = sub(foot, perp);
+    return r;
+  };
+  const mirrorOf = (e: Entity): Entity => {
+    const m = (p: Pt): Pt => reflect(p);
+    switch (e.kind) {
+      case "line":
+        return { ...e, a: m(e.a), b: m(e.b) };
+      case "polyline":
+        // Reflection reverses the winding; flipping the bulge sign keeps every
+        // arc on the same side of its chord it was on before.
+        return { ...e, points: e.points.map(m), ...(e.bulges ? { bulges: e.bulges.map((v) => -v) } : {}) };
+      case "circle":
+        return { ...e, center: m(e.center) };
+      case "arc": {
+        const s = angleOf(sub(m(add(e.center, pt(Math.cos(e.start) * e.radius, Math.sin(e.start) * e.radius))), m(e.center)));
+        const t = angleOf(sub(m(add(e.center, pt(Math.cos(e.end) * e.radius, Math.sin(e.end) * e.radius))), m(e.center)));
+        return { ...e, center: m(e.center), start: t, end: s };
+      }
+      case "spline":
+        return { ...e, points: e.points.map(m) };
+      case "text":
+        return { ...e, at: m(e.at), rotation: 2 * angleOf(dir) - e.rotation };
+      case "point":
+        return { ...e, at: m(e.at) };
+      case "leader":
+        return { ...e, points: e.points.map(m) };
+      case "hatch":
+        return { ...e, rings: e.rings.map((r) => r.map(m).reverse()) };
+      case "section":
+        return { ...e, a: m(e.a), b: m(e.b) };
+      default:
+        return e;
+    }
+  };
+  return {
+    kind: "mirror",
+    label: keep ? "Mirror" : "Mirror",
+    apply(doc, ctx) {
+      const before = new Map<EntityId, Entity | null>();
+      const after = new Map<EntityId, Entity | null>();
+      for (const id of ids) {
+        const e = doc.entities.get(id);
+        if (!e) continue;
+        const fresh = ctx.nextId();
+        before.set(fresh, null);
+        after.set(fresh, { ...mirrorOf(e), id: fresh });
+        if (!keep) {
+          before.set(id, e);
+          after.set(id, null);
+        }
+      }
+      return patchOf(before, after, keep ? "Mirror" : "Mirror", { history: doc.history }, { history: ["mirror", ...doc.history].slice(0, 200) });
+    },
+  };
+}
+
+/**
+ * Every trim pair a pick implies: each selected cutter against the entity the
+ * pick lands on, as one command per change, ready for `compositeCommand`.
+ */
+export function pairTrims(doc: DocumentState, cutters: readonly Entity[], at: Pt, tolerance = 5): Command[] {
+  const target = pickEntity(doc, at, tolerance);
+  if (!target) return [];
+  if (cutters.some((c) => c.id === target.id)) return [];
+  const targetEntity = doc.entities.get(target.id);
+  if (!targetEntity) return [];
+  const trimmed = trimEntity(targetEntity, cutters, at);
+  if ("remove" in trimmed && trimmed.remove === true) return [eraseEntities([target.id])];
+  if ("remove" in trimmed) return [];
+  if (JSON.stringify(trimmed) === JSON.stringify(targetEntity)) return [];
+  return [replaceEntity(target.id, () => trimmed as Entity)];
+}
+
+/** Replace a polyline's vertices (live editing); the id and style are kept. */
+export function setPolylinePoints(id: EntityId, points: readonly Pt[], closed?: boolean): Command {
+  return editCommand("polyline", "Polyline", (doc) => {
+    const e = doc.entities.get(id);
+    if (!e || e.kind !== "polyline") throw new Error(`polyline ${id} does not exist`);
+    return new Map([[id, { ...e, points, ...(closed === undefined ? {} : { closed }) }]]);
+  });
+}
+
+/** Add an entity template and let the context mint its id (explode, mirror, trim). */
+export function addEntityCommand(entity: Entity): Command {
+  return {
+    kind: "addEntity",
+    label: "Add",
+    apply(doc, ctx) {
+      const fresh = ctx.nextId();
+      return patchOf(new Map([[fresh, null]]), new Map([[fresh, { ...entity, id: fresh } as Entity]]), "Add", { history: doc.history }, { history: ["add", ...doc.history].slice(0, 200) });
+    },
+  };
+}
+
+/** Join: the chain of `ids` as one polyline that keeps the first entity's id and style. */
+export function joinCommand(doc: DocumentState, ids: readonly EntityId[], tolerance = FIT_TOLERANCE): Command | null {
+  const pts = joinEntities(doc, ids, tolerance);
+  if (!pts) return null;
+  const first = doc.entities.get(ids[0] ?? "");
+  if (!first) return null;
+  const closed = pts.length > 2 && dist(pts[0]!, pts[pts.length - 1]!) <= tolerance;
+  const points = closed ? pts.slice(0, -1) : pts;
+  const merged: Entity = { ...first, kind: "polyline", points, closed } as Entity;
+  return changeEntities("Join", ids.slice(1), [], new Map([[first.id, merged]]));
+}
+
+/** The polyline a live polygon tool is building, if any (most recent first). */
+export function lastPolyline(doc: DocumentState): Extract<Entity, { kind: "polyline" }> | null {
+  for (let i = doc.order.length - 1; i >= 0; i--) {
+    const e = doc.entities.get(doc.order[i]!);
+    if (e && e.kind === "polyline") return e;
+  }
+  return null;
+}
+
+/** A linear/aligned dimension as a driving rule, or null when it is not one. */
+export function dimensionRule(doc: DocumentState, dimId: EntityId): ParamRule | null {
+  const e = doc.entities.get(dimId);
+  if (!e || e.kind !== "dimension") return null;
+  if (e.dim !== "linear" && e.dim !== "aligned") return null;
+  return {
+    kind: "distance",
+    dim: dimId,
+    p1: varKey(e.id, "p1"),
+    p2: varKey(e.id, "p2"),
+    value: measureDimension(doc, e).value,
+  };
+}
+
+/** Entities a dimension measures: the copy of p1/p2 that sits on real geometry. */
+export function dimensionTargets(doc: DocumentState, dimId: EntityId, tolerance = FIT_TOLERANCE): EntityId[] {
+  const e = doc.entities.get(dimId);
+  if (!e || e.kind !== "dimension") return [];
+  const out: EntityId[] = [];
+  for (const p of [e.p1, e.p2]) {
+    for (const cand of doc.entities.values()) {
+      if (cand.id === dimId || cand.kind === "dimension") continue;
+      if (!entityVisible(doc, cand)) continue;
+      if (entityPoints(cand).some((q) => dist(q, p) <= tolerance)) {
+        out.push(cand.id);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+export interface DimensionDrive {
+  readonly command: Command | null;
+  /** "constraints do not fit", a dangling target, or why there is nothing to move. */
+  readonly problem: string | null;
+}
+
+/**
+ * The dimension-drives-geometry gesture, headless: write `value` into the
+ * dimension's parameter, solve the measured geometry with the dimension's two
+ * target points, and hand back the single command that does it — or a problem
+ * and `command: null`, so a caller can never commit half a solve.
+ */
+export function driveDimension(doc: DocumentState, dimId: EntityId, value: number): DimensionDrive {
+  if (!Number.isFinite(value)) return { command: null, problem: "value must be a number" };
+  const rule = dimensionRule(doc, dimId);
+  if (!rule) return { command: null, problem: "only linear and aligned dimensions drive geometry" };
+  const projection = projectScene(doc);
+  if (rule.kind !== "distance" || !projection.vars.has(rule.p1) || !projection.vars.has(rule.p2)) return { command: null, problem: "dimension target no longer exists" };
+  const targets = dimensionTargets(doc, dimId);
+  if (targets.length === 0) return { command: null, problem: "the dimension is not attached to any geometry" };
+  const dim = doc.entities.get(dimId);
+  if (!dim || dim.kind !== "dimension") return { command: null, problem: "dimension target no longer exists" };
+  const current = measureDimension(doc, dim).value;
+  if (Math.abs(current - value) < 1e-9) return { command: null, problem: null };
+  if (value <= 0) return { command: null, problem: "a dimension must be greater than zero" };
+  // The edit, stated the way AutoCAD states it: the measured edge keeps one end
+  // and its direction, and the other end slides until the gap is `value`.
+  // Nearest-vertex anchors are found through the same links the model uses, so
+  // a rect corner and a line end behave identically.
+  const links = dimensionLinkConstraints(doc, dimId);
+  if (links.length < 2) return { command: null, problem: "the dimension is not attached to any geometry at both ends" };
+  const anchorOf = (link: ConstraintDef): { entity: EntityId; index: number } | null => {
+    const [gx = ""] = [link.vars[2]];
+    const [entity = "", slot = ""] = gx.split("|");
+    return slot === "" ? null : { entity, index: Number(slot.replace(/^x:/, "")) };
+  };
+  const from = anchorOf(links[0]!);
+  const to = anchorOf(links[1]!);
+  if (!from || !to) return { command: null, problem: "the dimension is not attached to any geometry at both ends" };
+  // The pivot is the end nearest `dim.p1`, the first extension line: that end
+  // holds, the other slides along the measured direction until the gap is
+  // `value`. That is what "make this edge 600" means to a drafter.
+  const pivotEnd = dist(entityPointAt(doc, from), dim.p1) <= dist(entityPointAt(doc, to), dim.p1) ? from : to;
+  const movingEnd = pivotEnd === from ? to : from;
+  const pivotPt = entityPointAt(doc, pivotEnd);
+  const movingPt = entityPointAt(doc, movingEnd);
+  const dir = unit(sub(dim.p2, dim.p1)) ?? unit(sub(movingPt, pivotPt));
+  if (!dir) return { command: null, problem: "the dimension has no direction" };
+  const shift = sub(pt(pivotPt.x + dir.x * value, pivotPt.y + dir.y * value), movingPt);
+  // Every vertex that coincides with the moving end travels with it; the pivot,
+  // and every other vertex of the same entity, stays exactly where it is.
+  const updates = new Map<EntityId, Entity>();
+  const seen = new Set<EntityId>();
+  for (const t of targets) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    const e = doc.entities.get(t);
+    if (!e) continue;
+    const moved = mapPoints(e, (q) => (dist(q, movingPt) <= FIT_TOLERANCE ? add(q, shift) : q));
+    if (JSON.stringify(moved) !== JSON.stringify(e)) updates.set(t, moved);
+  }
+  if (updates.size === 0) return { command: null, problem: "the dimension is not attached to any geometry" };
+  // The dimension itself follows: its second point and text move with the edge,
+  // and a typed override no longer describes the geometry, so it clears.
+  const movedDim: Entity = { ...dim, p2: add(dim.p2, shift), at: add(dim.at, shift), textOverride: "" } as Entity;
+  const name = `d${dimId}`;
+  const parts: Command[] = [
+    changeEntities(`Drive dimension ${formatLength(value, doc.units)}`, [], [], new Map([...updates, [dimId, movedDim]])),
+    setParam(name, value),
+  ];
+  return { command: compositeCommand(`Drive dimension ${formatLength(value, doc.units)}`, parts), problem: null };
+}
+
+/** Two commands, one history entry: the undo stack holds the gesture, not its parts. */
+export function compositeCommand(label: string, parts: readonly Command[]): Command {
+  return {
+    kind: "composite",
+    label,
+    apply(doc, ctx) {
+      const before = new Map<EntityId, Entity | null>();
+      const after = new Map<EntityId, Entity | null>();
+      const docBefore: Partial<DocumentState> = {};
+      const docAfter: Partial<DocumentState> = {};
+      let working = doc;
+      for (const part of parts) {
+        const patch = part.apply(working, ctx);
+        for (const [id, e] of patch.forward) {
+          if (!before.has(id)) before.set(id, working.entities.get(id) ?? null);
+          after.set(id, e);
+        }
+        for (const [field, value] of Object.entries(patch.docBefore)) if (!(field in docBefore)) Object.assign(docBefore, { [field]: value });
+        Object.assign(docAfter, patch.docAfter);
+        working = applyPatch(working, patch, "forward");
+      }
+      return patchOf(before, after, label, docBefore, docAfter);
+    },
+  };
 }
 
 /* ============================================ geometry operations */
