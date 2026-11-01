@@ -258,6 +258,32 @@ export function scaleSolid(id: SolidId, factor: number | Vec3, pivot?: Vec3): Co
   return scaleSolids([id], factor, pivot);
 }
 
+/**
+ * Uniform scale about a grabbed point, so the point under the cursor stays put.
+ *
+ * `factor` is already the ratio the user's drag produced; this clamps it once
+ * rather than per object (scaling 0.001 to death), refuses non-finite values,
+ * and skips locked solids like every other transform. Unlike `scaleSolids`,
+ * the pivot is mandatory: a scale tool always scales about something the user
+ * pointed at, and defaulting it to the world origin would be a silent surprise.
+ */
+export function scaleAbout(ids: readonly SolidId[], factor: number, pivot: Vec3): Command {
+  return {
+    kind: "scaleAbout",
+    label: "Scale",
+    apply(doc, ctx) {
+      if (!Number.isFinite(factor) || factor <= 0) {
+        throw new RangeError("scale factor must be positive and finite");
+      }
+      if (!pivot.every(Number.isFinite)) throw new RangeError("scale pivot must be finite");
+      // 1e-6 .. 1e6 keeps every dimension inside double range for any model.
+      const f = Math.min(Math.max(factor, 1e-6), 1e6);
+      if (Math.abs(f - 1) < 1e-9) return patchOf(doc, new Map(), new Map(), "No change");
+      return transformPatch(doc, ids, ctx.resolve, (m) => withScale(m, [f, f, f], pivot), "Scale");
+    },
+  };
+}
+
 /** Rotate one or more solids about a world axis through `pivot`, in degrees. */
 export function rotateSolids(ids: readonly SolidId[], axis: Axis, degrees: number, pivot: Vec3 = [0, 0, 0]): Command {
   return {

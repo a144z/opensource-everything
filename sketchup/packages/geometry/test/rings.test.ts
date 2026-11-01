@@ -144,6 +144,17 @@ describe("three-point arc", () => {
     expect(geo.volume).toBeCloseTo(3927 * 20, -3);
   });
 
+  it("refuses a raised point instead of flattening the arc silently", () => {
+    expect(() =>
+      arcPoints([
+        [0, 0, 0],
+        [50, 50, 0],
+        [100, 0, 40],
+      ]),
+    ).toThrow(/ground plane/);
+    expect(() => arcPoints([[0, 0, 10]], [100, 0, 0])).toThrow(/ground plane/);
+  });
+
   it("counterClockwise fixes the winding an arc inherits from its sweep", () => {
     const cw = closedArc(
       arcPoints(

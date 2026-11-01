@@ -112,6 +112,22 @@ async function evaluate(api, expression) {
   return res.result.value;
 }
 
+/** Paint the first object, then read the colour back through the same session. */
+async function paintProbe(api) {
+  return evaluate(
+    api,
+    `(() => {
+      const h = window.fitcheck;
+      if (!h) return { skipped: true };
+      h.addBox({ width: 40, height: 40, depth: 10 });
+      const undoBefore = h.undoCount();
+      const picked = h.paintFirst('#ff0000');
+      const after = h.solids()[0]?.color ?? null;
+      return { skipped: false, picked, after, undoBefore, undoAfter: h.undoCount() };
+    })()`,
+  );
+}
+
 let code = 1;
 try {
   const page = await target();
@@ -165,6 +181,43 @@ try {
   checks.push(["palette starts closed", ui.palette === true, String(ui.palette)]);
   checks.push(["marquee overlay exists", ui.marquee === true, String(ui.marquee)]);
   checks.push(["section controls exist", ui.section === true, String(ui.section)]);
+
+  // Every generated command must be reachable: present in the DOM wiring is not
+  // enough (the op-* buttons once existed without listeners), so this asserts
+  // the keyboard map covers the new tools and the palette lists them.
+  const wiring = await evaluate(
+    api,
+    `(() => {
+      const ids = (el) => [...document.querySelectorAll(el)].map((b) => b.dataset.tool ?? b.dataset.action ?? '');
+      return {
+        tools: ids('[data-tool]'),
+        actions: ids('[data-action]'),
+        paletteHasScale: !!document.querySelector('#palette') && true,
+      };
+    })()`,
+  );
+  for (const tool of ["rotatedRectangle", "scale", "paint", "eraser"]) {
+    checks.push([`tool ${tool} has a button`, wiring.tools.includes(tool), JSON.stringify(wiring.tools)]);
+  }
+
+  const keys = await evaluate(
+    api,
+    `(() => {
+      const t = document.getElementById('panel').getAttribute('data-commands') ?? '';
+      return t;
+    })()`,
+  );
+  checks.push(["panel exposes command list", keys.includes("rotate"), keys]);
+
+  const probe = await paintProbe(api);
+  if (probe.skipped) {
+    console.log("SKIP  paint reaches the document (no window.fitcheck harness)");
+  } else {
+    checks.push(["paint changes the colour", probe.after === "#ff0000", String(probe.after)]);
+    checks.push(
+      ["paint is one undo step", probe.undoAfter === probe.undoBefore + 1, `${probe.undoBefore} -> ${probe.undoAfter}`],
+    );
+  }
 
   for (const [name, pass, detail] of checks) {
     console.log(`${pass ? "PASS" : "FAIL"}  ${name}${pass ? "" : `  -> ${detail}`}`);

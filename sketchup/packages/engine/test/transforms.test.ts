@@ -16,10 +16,12 @@ import {
   pullFace,
   rotateSolid,
   rotateSolids,
+  scaleAbout,
   scaleSolid,
   scaleSolids,
   serializeJson,
   setEnvelope,
+  setMeta,
   translateSolid,
   translateSolids,
   type SolidId,
@@ -164,6 +166,66 @@ describe("transforms preserve true size", () => {
     expect(x).toBeCloseTo(10, 4);
     expect(y).toBeCloseTo(10, 4);
     expect(s.analyse(id).volume).toBeCloseTo(before, 3);
+  });
+});
+
+describe("scale about a grabbed point", () => {
+  it("keeps the pivot fixed and scales uniformly", () => {
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    const before = s.boundsOf(id);
+    // Grab the far corner of the box: it must not move.
+    const pivot: [number, number, number] = [before.max[0], before.max[1], before.max[2]];
+    s.execute(scaleAbout([id], 2, pivot));
+    const after = s.boundsOf(id);
+    expect(after.max[0]).toBeCloseTo(pivot[0], 6);
+    expect(after.max[1]).toBeCloseTo(pivot[1], 6);
+    expect(after.max[2]).toBeCloseTo(pivot[2], 6);
+    expect(after.min[0]).toBeCloseTo(pivot[0] - 20, 6);
+    expect(size(s, id)[0]).toBeCloseTo(20, 6);
+    expect(s.analyse(id).volume).toBeCloseTo(8000, 2);
+  });
+
+  it("one undo restores the exact previous document", () => {
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    const hash = s.hash();
+    s.execute(scaleAbout([id], 3, [0, 0, 0]));
+    s.undo();
+    expect(s.hash()).toBe(hash);
+  });
+
+  it("refuses a non-positive or non-finite factor without touching history", () => {
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    const hash = s.hash();
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => s.execute(scaleAbout([id], bad, [0, 0, 0]))).toThrow(/positive and finite/);
+    }
+    expect(s.hash()).toBe(hash);
+    // A rejected command must not become an undo step (validate at construction).
+    expect(s.canUndo).toBe(true);
+    s.undo();
+    expect(s.document.solids.size).toBe(0);
+  });
+
+  it("leaves locked solids alone and a factor of 1 is a no-op", () => {
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    const hash = s.hash();
+    s.execute(setMeta(id, { locked: true }));
+    s.execute(scaleAbout([id], 2, [0, 0, 0]));
+    expect(Math.abs(s.boundsOf(id).max[0] - 10)).toBeLessThan(1e-6);
+
+    s.execute(setMeta(id, { locked: false }));
+    const hashOpen = s.hash();
+    s.execute(scaleAbout([id], 1, [5, 5, 5]));
+    expect(s.hash()).toBe(hashOpen);
+    expect(hash).toBeTruthy();
   });
 });
 

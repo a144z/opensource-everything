@@ -5,6 +5,7 @@
 export const commandLabels = {
   'select': 'Select',
   'rectangle': 'Rectangle',
+  'rotatedRectangle': 'Rotated Rectangle',
   'circle': 'Circle',
   'arc': 'Arc',
   'line': 'Line',
@@ -13,6 +14,9 @@ export const commandLabels = {
   'followme': 'Follow Me',
   'move': 'Move',
   'rotate': 'Rotate',
+  'scale': 'Scale',
+  'paint': 'Paint',
+  'eraser': 'Eraser',
   'tape': 'Tape',
   'dimension': 'Dimension',
   'delete': 'Delete',
@@ -48,6 +52,7 @@ export type CommandId = keyof typeof commandLabels;
 export const commandKeys: Partial<Record<CommandId, string>> = {
   'select': ' ',
   'rectangle': 'r',
+  'rotatedRectangle': 'Alt+r',
   'circle': 'c',
   'arc': 'a',
   'line': 'l',
@@ -56,6 +61,9 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'followme': 'f',
   'move': 'q',
   'rotate': 'i',
+  'scale': 's',
+  'paint': 'b',
+  'eraser': 'e',
   'tape': 'm',
   'dimension': 'd',
   'delete': 'Delete',
@@ -74,7 +82,7 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
 };
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
-export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'tape', 'dimension', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
+export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'rotatedRectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'scale', 'paint', 'eraser', 'tape', 'dimension', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
 export function isCommand(id: string): id is CommandId {
@@ -88,6 +96,8 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'select', label: commandLabels['select'] };
     case 'rectangle':
       return { id: 'rectangle', label: commandLabels['rectangle'] };
+    case 'rotatedRectangle':
+      return { id: 'rotatedRectangle', label: commandLabels['rotatedRectangle'] };
     case 'circle':
       return { id: 'circle', label: commandLabels['circle'] };
     case 'arc':
@@ -104,6 +114,12 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'move', label: commandLabels['move'] };
     case 'rotate':
       return { id: 'rotate', label: commandLabels['rotate'] };
+    case 'scale':
+      return { id: 'scale', label: commandLabels['scale'] };
+    case 'paint':
+      return { id: 'paint', label: commandLabels['paint'] };
+    case 'eraser':
+      return { id: 'eraser', label: commandLabels['eraser'] };
     case 'tape':
       return { id: 'tape', label: commandLabels['tape'] };
     case 'dimension':

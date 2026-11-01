@@ -8,7 +8,7 @@
   </head>
   <body>
     <div id="app">
-      <aside id="panel">
+      <aside id="panel" data-commands="">
         <header>
           <h1>FitCheck</h1>
           <span class="ver">L2</span>
@@ -27,6 +27,20 @@
           <button data-tool="rotate" title="Rotate about Z (I)">Rotate</button>
           <button data-tool="circle" title="Circle (C)">Circle</button>
           <button data-tool="arc" title="Arc, three-point (A)">Arc</button>
+          <button data-tool="rotatedRectangle" title="Rotated Rectangle (Alt+R)">Rot. Rect</button>
+          <button data-tool="scale" title="Scale about a point (S)">Scale</button>
+          <button data-tool="paint" title="Paint bucket (B)">Paint</button>
+          <button data-tool="eraser" title="Eraser (E)">Eraser</button>
+        </section>
+
+        <section class="paint">
+          <h2>Materials</h2>
+          <div class="row">
+            <input id="paint-color" type="color" value="#d64541" title="The colour the bucket holds" />
+            <button id="paint-add" title="Keep this colour in the materials strip">+</button>
+            <button id="paint-apply" title="Paint the selected objects">Paint selection</button>
+          </div>
+          <div id="swatches" class="swatches" aria-label="Saved colours"></div>
         </section>
 
         <section class="gizmo">

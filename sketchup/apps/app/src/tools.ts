@@ -17,6 +17,7 @@ import {
   makeAnnotation,
   pullFace as pullFaceCmd,
   rotateSolids,
+  scaleAbout,
   scaleSolids,
   translateSolids,
   type Annotation,
@@ -51,6 +52,12 @@ export interface ToolHost {
   annotate(note: Annotation): void;
   /** What is selected right now; move and rotate act on all of it. */
   selection(): readonly SolidId[];
+  /** Eraser: the host owns undo grouping, so erasing goes through it. */
+  erase(ids: readonly SolidId[]): void;
+  /** Paint: the colour the bucket currently holds. */
+  paintColor(): string;
+  /** Paint: report the colour applied so the host can echo it in a toast. */
+  painted(id: SolidId, color: string): void;
 }
 
 type Pending =
@@ -100,6 +107,24 @@ type Pending =
       readonly kind: "rotate";
       readonly pivot: Vec3;
       readonly from: Vec3;
+      current: Vec3;
+    }
+  | {
+      /**
+       * Rotated rectangle: base edge by two clicks, then width, then depth.
+       * `edge` is the placed corner behind the first; the rest is computed.
+       */
+      readonly kind: "rrect";
+      readonly start: Vec3;
+      /** Set once the base edge is placed; compared by identity to know which click is next. */
+      corner: Vec3;
+      current: Vec3;
+    }
+  | {
+      /** Scale: pivot on the ground, then distance from it sets the factor. */
+      readonly kind: "scale";
+      readonly pivot: Vec3;
+      readonly base: number;
       current: Vec3;
     }
   | {
@@ -157,7 +182,8 @@ export class ToolController {
   /** Typed digits while a tool is active (numeric entry, task L1-12). */
   typeKey(key: string): boolean {
     if (!this.#pending) return false;
-    if (/^[0-9.,-]$/.test(key)) {
+    // `,` is the separator in "width,angle"; `.` is the decimal point.
+    if (/^[0-9.,\-]$/.test(key)) {
       this.#typed += key;
       this.#applyTyped();
       return true;
@@ -202,6 +228,63 @@ export class ToolController {
       const len = Math.hypot(d[0], d[1], d[2]) || 1;
       p.current = [p.from[0] + (d[0] / len) * parsed.mm, p.from[1] + (d[1] / len) * parsed.mm, p.from[2] + (d[2] / len) * parsed.mm];
       this.#drawSpan(p.from, p.current);
+    } else if (p.kind === "scale") {
+      // A bare number is a factor; "2x" and "200%" read the same way.
+      const factor = parseFactor(this.#typed);
+      this.#host.setHint(`Scale x${factor.toFixed(3)} (Enter to apply, Esc cancels)`);
+      if (commit) {
+        this.#cancel();
+        const ids = [...this.#host.selection()];
+        try {
+          this.#host.session.execute(scaleAbout(ids, factor, p.pivot));
+          this.#host.setHint(`Scaled ${ids.length} object(s) by x${factor.toFixed(3)}.`);
+        } catch (err) {
+          this.#host.setHint((err as Error).message);
+        }
+        return;
+      }
+    } else if (p.kind === "rrect" && p.corner !== p.start) {
+      // With the base edge placed, a bare length is the depth: "400" means a
+      // 400 mm deep rectangle. `depth` is kept so the preview agrees.
+      if (parsed) {
+        const ux = (p.corner[0] - p.start[0]) / Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
+        const uy = (p.corner[1] - p.start[1]) / Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
+        p.current = [p.corner[0] - uy * parsed.mm, p.corner[1] + ux * parsed.mm, p.corner[2]];
+        const quad = rotatedRectQuad(p.start, p.corner, p.current);
+        this.#setPreview(
+          quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]),
+        );
+        this.#host.setHint(`Rotated rectangle depth ${fmt(parsed.mm)} mm (Enter to finish, Esc cancels)`);
+        if (commit) {
+          const width = Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
+          const degrees = (Math.atan2(p.corner[1] - p.start[1], p.corner[0] - p.start[0]) * 180) / Math.PI;
+          this.#cancel();
+          this.#buildRotatedRect(width, parsed.mm, p.start, degrees);
+        }
+        return;
+      }
+      // "width,angle" - the base edge's length and its heading in degrees.
+      const [widthText, angleText] = this.#typed.split(",");
+      const width = widthText ? parseLength(widthText, this.#host.unit()) : null;
+      const degrees = angleText ? Number(angleText) : 0;
+      if (width && Number.isFinite(degrees)) {
+        const a = (degrees * Math.PI) / 180;
+        p.corner = [
+          p.start[0] + Math.cos(a) * width.mm,
+          p.start[1] + Math.sin(a) * width.mm,
+          p.start[2],
+        ];
+        const quad = rotatedRectQuad(p.start, p.corner, p.current);
+        this.#setPreview(
+          quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]),
+        );
+        this.#host.setHint(
+          `Rotated rectangle base ${fmt(width.mm)} mm at ${degrees.toFixed(1)} deg. ` +
+            `Type "depth" or click to set the depth, Esc cancels`,
+        );
+      } else {
+        this.#host.setHint(`Rotated rectangle: type "width,angle" (e.g. 400,30): ${this.#typed}`);
+      }
     }
     if (commit) {
       if (p.kind === "pull") this.#commitPull(p, parsed ? parsed.mm : 0);
@@ -282,11 +365,43 @@ export class ToolController {
           `Rotate ${this.#angle(p, p.current).toFixed(1)} deg  ${this.#glyphHint()} click to apply, Esc cancels`,
         );
       }
+    } else if (p?.kind === "rrect") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.start, GLOSSARY_UP);
+      if (!pt) return;
+      p.current = this.#snap(pt).point;
+      const quad = rotatedRectQuad(p.start, p.corner, p.current);
+      this.#setPreview(quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]));
+      this.#host.setHint(
+        `Rotated rectangle ${fmt(Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]))} x ` +
+          `${fmt(Math.hypot(p.current[0] - p.corner[0], p.current[1] - p.corner[1]))} mm  ` +
+          `type width,angle to be exact, click to finish, Esc cancels`,
+      );
+    } else if (p?.kind === "scale") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.pivot, GLOSSARY_UP);
+      if (!pt) return;
+      p.current = this.#snap(pt).point;
+      const factor = Math.hypot(p.current[0] - p.pivot[0], p.current[1] - p.pivot[1]) / p.base;
+      this.#drawSpan(p.pivot, this.#constrain(p.pivot, p.current));
+      this.#host.setHint(
+        `Scale x${factor.toFixed(3)}  ${this.#glyphHint()} click to apply, Esc cancels`,
+      );
     }
   }
 
   click(hit: PickHit, additive: boolean, clientX: number, clientY: number, copy = false): void {
     switch (this.#tool) {
+      case "rotatedRectangle":
+        this.#clickRotatedRect(hit, clientX, clientY);
+        return;
+      case "scale":
+        this.#clickScale(hit, clientX, clientY);
+        return;
+      case "paint":
+        this.#applyPaint(hit);
+        return;
+      case "eraser":
+        this.#applyErase(hit);
+        return;
       case "rectangle":
         this.#clickRectangle(hit);
         return;
@@ -816,6 +931,128 @@ export class ToolController {
     return deg;
   }
 
+  /**
+   * Rotated rectangle, the SketchUp gesture: first click sets a corner, second
+   * sets the base edge (so the rectangle may face any direction), third sets
+   * the depth. The loop is built in local space and placed with a rotation
+   * matrix, which is why the base edge is squared off rather than trusted raw:
+   * a slanted second click still gives four right angles.
+   */
+  #clickRotatedRect(hit: PickHit, clientX: number, clientY: number): void {
+    const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    const p = this.#pending;
+    if (p?.kind !== "rrect") {
+      this.#pending = { kind: "rrect", start: at, corner: at, current: at };
+      this.#host.setHint("Rotated rectangle: click the end of the base edge, then its depth");
+      return;
+    }
+    if (p.corner === p.start) {
+      if (Math.hypot(at[0] - p.start[0], at[1] - p.start[1]) < 0.5) return;
+      p.corner = at;
+      this.#host.setHint("Rotated rectangle: click to set the depth");
+      return;
+    }
+    this.#cancel();
+    const width = Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
+    const depth = Math.hypot(at[0] - p.corner[0], at[1] - p.corner[1]);
+    const angle = (Math.atan2(p.corner[1] - p.start[1], p.corner[0] - p.start[0]) * 180) / Math.PI;
+    this.#buildRotatedRect(width, Math.max(depth, 0.1), p.start, angle);
+  }
+
+  /** One place where a placed rotated rectangle becomes geometry. */
+  #buildRotatedRect(width: number, depth: number, start: Vec3, degrees: number): void {
+    if (width < 0.5 || depth < 0.5) {
+      this.#host.setHint("Rotated rectangle: both sides must be at least 0.5 mm.");
+      return;
+    }
+    // Local ring starts at the origin so `start` is exactly the clicked corner.
+    const local: Vec2[] = [
+      [0, 0],
+      [width, 0],
+      [width, -depth],
+      [0, -depth],
+    ];
+    const recipe: SolidRecipe = {
+      kind: "loop",
+      points: counterClockwise(local),
+      plane: { origin: [0, 0, 0], normal: [0, 0, 1] },
+      distance: 10,
+      matrix: placeOnGround(start, degrees),
+    };
+    try {
+      const patch = this.#host.session.execute(
+        addSolidCmd(recipe, { name: `Rect ${fmt(width)}x${fmt(depth)} @ ${degrees.toFixed(0)}` }),
+      );
+      const added = [...patch.forward.keys()][0];
+      if (added) {
+        this.#lastPullId = added;
+        this.#host.select([added]);
+      }
+      this.#host.setHint("Rotated rectangle created. Push/Pull to give it height.");
+    } catch (err) {
+      this.#host.setHint((err as Error).message);
+    }
+  }
+
+  /** Scale: click the point that stays put, then drag out from it. */
+  #clickScale(hit: PickHit, clientX: number, clientY: number): void {
+    const p = this.#pending;
+    const ids = [...this.#host.selection()];
+    if (p?.kind === "scale") {
+      this.#cancel();
+      const distance = Math.hypot(p.current[0] - p.pivot[0], p.current[1] - p.pivot[1]);
+      const factor = distance / p.base;
+      if (ids.length === 0) {
+        this.#host.setHint("Scale: nothing selected.");
+        return;
+      }
+      try {
+        this.#host.session.execute(scaleAbout(ids, factor, p.pivot));
+        this.#host.setHint(`Scaled ${ids.length} object(s) by x${factor.toFixed(3)}.`);
+      } catch (err) {
+        this.#host.setHint((err as Error).message);
+      }
+      return;
+    }
+    if (ids.length === 0) {
+      this.#host.setHint("Scale: select something first, then click the point that should stay put.");
+      return;
+    }
+    const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    this.#pending = { kind: "scale", pivot: at, base: 100, current: [at[0] + 100, at[1], at[2]] };
+    this.#host.setHint("Scale: drag away from the pivot, click to apply, or type a factor");
+  }
+
+  /** Paint bucket: the object under the cursor takes the current colour. */
+  #applyPaint(hit: PickHit): void {
+    if (hit.kind !== "solid") {
+      this.#host.setHint("Paint: click an object to paint it.");
+      return;
+    }
+    const solid = this.#host.session.document.solids.get(hit.id);
+    if (solid?.meta.locked) {
+      this.#host.setHint("Paint: that object is locked.");
+      return;
+    }
+    this.#host.painted(hit.id, this.#host.paintColor());
+  }
+
+  /** Eraser: click an object and it is gone, one object per undo step. */
+  #applyErase(hit: PickHit): void {
+    if (hit.kind !== "solid") {
+      this.#host.setHint("Eraser: click an object to erase it.");
+      return;
+    }
+    const solid = this.#host.session.document.solids.get(hit.id);
+    if (solid?.meta.locked) {
+      this.#host.setHint("Eraser: that object is locked.");
+      return;
+    }
+    this.#host.erase([hit.id]);
+  }
+
   #clickSelect(hit: PickHit, additive: boolean): void {
     // Shift toggles (the host flips membership); a plain click replaces.
     if (hit.kind === "solid") this.#host.select([hit.id], additive);
@@ -907,6 +1144,10 @@ const HINTS: Record<Tool, string> = {
   rotate: "Rotate: click the pivot, then drag to set the angle",
   circle: "Circle: click the centre, then move to set the radius",
   arc: "Arc: click the start, a point on the arc, then the end",
+  rotatedRectangle: "Rotated Rectangle: click a corner, the end of the base edge, then the depth",
+  scale: "Scale: click the point that stays put, then drag outward to grow (type a factor)",
+  paint: "Paint: click an object to give it the current colour",
+  eraser: "Eraser: click an object to erase it",
 };
 
 /** Ground grid used for snapping when no vertex or midpoint is near. */
@@ -966,5 +1207,55 @@ function distance(a: Vec3, b: Vec3): number {
 
 function distance2(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+/**
+ * The four corners of a rectangle whose base edge runs `start -> corner` and
+ * whose depth reaches towards `current`. The second edge is squared off against
+ * the base edge, so a slanted third click still draws right angles: that is the
+ * whole point of the tool. Pure, so the preview and the commit agree exactly.
+ */
+function rotatedRectQuad(start: Vec3, corner: Vec3, current: Vec3): Vec2[] {
+  const bx = corner[0] - start[0];
+  const by = corner[1] - start[1];
+  const base = Math.hypot(bx, by);
+  if (base < 1e-9) return [[start[0], start[1]]];
+  // Unit base vector, and its left normal.
+  const ux = bx / base;
+  const uy = by / base;
+  const nx = -uy;
+  const ny = ux;
+  // Depth is the component of (current - corner) along the normal, signed.
+  const depth = (current[0] - corner[0]) * nx + (current[1] - corner[1]) * ny;
+  return [
+    [start[0], start[1]],
+    [corner[0], corner[1]],
+    [corner[0] + nx * depth, corner[1] + ny * depth],
+    [start[0] + nx * depth, start[1] + ny * depth],
+  ];
+}
+
+/**
+ * Scale factor from typed text: `2`, `2x`, `200%` and `0.5` all read plainly.
+ * Rejects anything that is not a positive finite number rather than guessing.
+ */
+function parseFactor(text: string): number {
+  const t = text.trim().replace(/x$/i, "").replace(/%$/, "");
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return text.trim().endsWith("%") ? n / 100 : n;
+}
+
+/**
+ * Column-major matrix placing a ground-plane profile whose local origin is at
+ * `at`, turned `degrees` about the vertical axis. Matches the engine's own
+ * convention (`rotateZ` then translate), so a recipe built this way needs no
+ * special case in resolution or in `.fcproj` round-trips.
+ */
+function placeOnGround(at: Vec3, degrees: number): number[] {
+  const r = (degrees * Math.PI) / 180;
+  const c = Math.cos(r);
+  const s = Math.sin(r);
+  return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, at[0], at[1], at[2], 1];
 }
 

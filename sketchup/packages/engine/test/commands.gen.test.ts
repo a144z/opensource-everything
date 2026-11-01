@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandAll, commandDescribe, commandLabels, isCommand } from "../src/index.js";
+import { commandAll, commandDescribe, commandForEvent, commandKeys, commandLabels, isCommand } from "../src/index.js";
 
 /**
  * The generated command table is the one place the editor's vocabulary lives.
@@ -9,12 +9,16 @@ import { commandAll, commandDescribe, commandLabels, isCommand } from "../src/in
 const TOOL_IDS = [
   "select",
   "rectangle",
+  "rotatedRectangle",
   "pushpull",
   "line",
   "tape",
   "dimension",
   "followme",
   "offset",
+  "scale",
+  "paint",
+  "eraser",
 ] as const;
 
 describe("generated command table", () => {
@@ -39,5 +43,21 @@ describe("generated command table", () => {
     // Tools are the things a single click can start; delete/undo are not.
     expect(commandLabels["delete"]).toBe("Delete");
     expect(commandLabels["undo"]).toBe("Undo");
+  });
+
+  it("binds the L2 tools to the keys SketchUp uses", () => {
+    const bind = (key: string, alt = false) => ({
+      key,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: alt,
+      shiftKey: false,
+    });
+    expect(commandForEvent(commandKeys, bind("s"))).toBe("scale");
+    expect(commandForEvent(commandKeys, bind("b"))).toBe("paint");
+    expect(commandForEvent(commandKeys, bind("e"))).toBe("eraser");
+    expect(commandForEvent(commandKeys, bind("r", true))).toBe("rotatedRectangle");
+    // Plain R stays the axis-aligned rectangle: Alt is what tells them apart.
+    expect(commandForEvent(commandKeys, bind("r"))).toBe("rectangle");
   });
 });

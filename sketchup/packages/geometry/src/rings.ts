@@ -33,15 +33,28 @@ export function circlePoints(
 }
 
 /**
- * Three-point arc: `points[0]` is the start, `points[1]` (or `through`, once
- * both are known) lies on the arc, and the end is the last known point.
+ * Three-point arc on the ground plane: `points[0]` is the start, `points[1]`
+ * (or `through`, once both are known) lies on the arc, and the end is the last
+ * known point.
  *
  * With fewer than three distinct points this degrades to a straight chord,
  * which is exactly what the preview should show while the user is still
  * choosing.
+ *
+ * `z` is deliberately discarded: the result is a ring that the `loop` recipe
+ * extrudes along +Z, so an arc lives on the ground plane and Push/Pull gives it
+ * height. Callers holding raised points get `flatArc`'s loud refusal instead of
+ * a silently collapsed arc.
  */
 export function arcPoints(points: readonly Vec3[], through: Vec3 | null = null): Vec2[] {
   const all = through ? [...points, through] : [...points];
+  for (const q of all) {
+    if (q[2] !== 0) {
+      throw new RangeError(
+        `arcPoints draws on the ground plane, but a point has z=${q[2]} mm; level it or use a raised profile`,
+      );
+    }
+  }
   const flat = all.map((q): Vec2 => [q[0], q[1]]);
   if (flat.length === 0) return [];
   if (flat.length < 3) return [flat[0]!, flat[flat.length - 1]!];

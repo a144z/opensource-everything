@@ -9,6 +9,7 @@ import {
   arrayCopy,
   booleanSolids,
   centreInEnvelope,
+  commandAll,
   commandForEvent,
   commandKeys,
   commandLabels,
@@ -18,6 +19,7 @@ import {
   duplicateSolid,
   fitToEnvelope,
   instanceCopy,
+  isCommand,
   renameSolid,
   serializeJson,
   setColor,
@@ -107,7 +109,95 @@ const tools = new ToolController({
     renderAnnotations();
   },
   selection: () => [...selection],
+  erase: (ids) => {
+    session.execute(deleteSolids(ids));
+    setSelection([...selection].filter((id) => !ids.includes(id)));
+    hint.textContent = `Erased ${ids.length} object(s).`;
+    refresh();
+  },
+  paintColor: () => paintColor,
+  painted: (id, color) => {
+    // Paint is the one tool that colours without a selection, so it must not
+    // disturb what is already selected.
+    session.execute(setColor([id], color));
+    hint.textContent = `Painted ${color}.`;
+    refresh();
+  },
 });
+
+/** The bucket's current colour. A paint tool needs a held colour to be a tool. */
+let paintColor = "#d64541";
+
+/* ----------------------------------------------------------- materials */
+
+const MATERIALS_KEY = "fitcheck.materials";
+
+/** Colours the user saved. Seeded with a usable set so the strip is never empty. */
+let materials: string[] = (() => {
+  try {
+    const raw = localStorage.getItem(MATERIALS_KEY);
+    const saved: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(saved)) {
+      const clean = saved.filter((c): c is string => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c));
+      if (clean.length > 0) return clean.slice(0, 24);
+    }
+  } catch {
+    // Corrupt or unavailable storage falls back to the defaults below.
+  }
+  return ["#d64541", "#f0a500", "#2e8b57", "#2f6f9f", "#d9d9d9", "#3b3b3b"];
+})();
+
+function saveMaterials(): void {
+  try {
+    localStorage.setItem(MATERIALS_KEY, JSON.stringify(materials));
+  } catch {
+    // Storage full or blocked: the strip still works this session.
+  }
+}
+
+function setPaintColor(color: string): void {
+  paintColor = color;
+  ($("paint-color") as HTMLInputElement).value = color;
+}
+
+/** Clicking a swatch both picks the colour *and* paints the selection, as a bucket should. */
+function useMaterial(color: string): void {
+  setPaintColor(color);
+  const ids = [...selection];
+  if (ids.length === 0) {
+    hint.textContent = `Bucket now holds ${color}. Click objects with the Paint tool.`;
+    return;
+  }
+  quietly(() => session.execute(setColor(ids, color)), `Painted ${ids.length} object(s) ${color}.`);
+}
+
+function renderMaterials(): void {
+  const strip = $("swatches");
+  strip.replaceChildren();
+  for (const color of materials) {
+    const b = document.createElement("button");
+    b.className = "swatch-chip";
+    b.style.background = color;
+    b.title = `${color}: paint the selection`;
+    b.dataset["color"] = color;
+    if (color === paintColor) b.classList.add("active");
+    b.addEventListener("click", () => useMaterial(color));
+    strip.append(b);
+  }
+}
+
+$("paint-color").addEventListener("change", () =>
+  setPaintColor(($("paint-color") as HTMLInputElement).value),
+);
+$("paint-add").addEventListener("click", () => {
+  const color = ($("paint-color") as HTMLInputElement).value.toLowerCase();
+  if (!materials.includes(color)) materials = [color, ...materials].slice(0, 24);
+  saveMaterials();
+  renderMaterials();
+  hint.textContent = `Saved ${color} to materials.`;
+});
+$("paint-apply").addEventListener("click", () => useMaterial(paintColor));
+
 
 /* ----------------------------------------------------------- annotations */
 
@@ -346,6 +436,9 @@ function beginRename(row: HTMLLIElement, solid: Solid): void {
 
 function renderPanel(): void {
   const doc = session.document;
+  // The command list is published on the panel so a headless check can prove the
+  // palette and the toolbar are backed by the generated table, not by literals.
+  $("panel").dataset["commands"] = commandAll.join(",");
   const outliner = $("outliner");
   outliner.innerHTML = "";
   // Grouping is presentation only: the document has one flat list, and every
@@ -512,6 +605,7 @@ function refresh(): void {
   view.sync();
   renderPanel();
   renderTags();
+  renderMaterials();
 }
 
 /** Rebuild the tag list: one row per tag, with show/hide and a count. */
@@ -573,6 +667,10 @@ function runCommand(id: CommandId): void {
       case "followme":
       case "move":
       case "rotate":
+      case "scale":
+      case "paint":
+      case "eraser":
+      case "rotatedRectangle":
       case "tape":
       case "dimension":
         selectTool(id);
@@ -687,6 +785,9 @@ function commandEnabled(id: CommandId): boolean {
     case "delete":
     case "duplicate":
     case "instance":
+      return count >= 1;
+    case "scale":
+      // Scaling needs a pivot, so it needs something selected to be useful.
       return count >= 1;
     case "union":
     case "subtract":
@@ -1033,3 +1134,68 @@ async function start(): Promise<void> {
 }
 
 void start();
+
+/* -------------------------------------------------------------- harness */
+
+/**
+ * A narrow testing surface for `scripts/smoke.mjs`. It exposes *intent*
+ * (run a command, add a starter box) and *observations* (colours, undo depth),
+ * never a second way to mutate the document: every write below goes through
+ * `runCommand` or `session.execute`. With VITE_STRICT_HARNESS unset it is always
+ * attached, because the smoke test is the guard that proves the toolbar, the
+ * keyboard and the palette stay wired.
+ */
+interface FitCheckHarness {
+  run(id: CommandId): boolean;
+  addBox(size: { width: number; height: number; depth: number }): boolean;
+  paintFirst(color: string): boolean;
+  solids(): { id: string; name: string; color: string }[];
+  undoCount(): number;
+}
+
+declare global {
+  interface Window {
+    fitcheck?: FitCheckHarness;
+  }
+}
+
+window.fitcheck = {
+  run(id) {
+    if (!isCommand(id)) return false;
+    runCommand(id);
+    return true;
+  },
+  addBox(size) {
+    try {
+      session.execute(
+        addSolid(
+          {
+            kind: "box",
+            width: size.width,
+            height: size.height,
+            depth: size.depth,
+            origin: [0, 0, 0],
+            matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          },
+          { name: "Probe box" },
+        ),
+      );
+      refresh();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  paintFirst(color) {
+    const first = [...session.document.solids.values()][0];
+    if (!first) return false;
+    setPaintColor(color);
+    session.execute(setColor([first.id], color));
+    refresh();
+    return true;
+  },
+  solids: () =>
+    [...session.document.solids.values()].map((s) => ({ id: s.id, name: s.meta.name, color: s.meta.color })),
+  undoCount: () => session.historyDepth,
+};
+

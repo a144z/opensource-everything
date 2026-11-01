@@ -33,7 +33,11 @@ export type Tool =
   | "move"
   | "rotate"
   | "circle"
-  | "arc";
+  | "arc"
+  | "rotatedRectangle"
+  | "scale"
+  | "paint"
+  | "eraser";
 
 export type PickHit =
   | { readonly kind: "ground"; readonly point: Vec3 }
