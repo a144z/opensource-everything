@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -78,6 +78,21 @@ export type SolidRecipe =
       readonly points: readonly Vec2[];
       readonly plane: { readonly origin: Vec3; readonly normal: Vec3 };
       readonly distance: number;
+    })
+  | (RecipeBase & {
+      /**
+       * Zero-thickness face: a closed ring triangulated in its own plane, no
+       * `distance` and no volume.
+       *
+       * A face is a first-class document object, not a degenerate solid: it is
+       * picked and selected by its surface, it is the base push/pull extrudes
+       * from, and it is counted by area rather than by volume. Modelling it as a
+       * 10 mm-thick `loop` made every box drawn on screen a hidden slab that a
+       * BOQ counted as material, which is why the honest shape is its own kind.
+       */
+      readonly kind: "face";
+      readonly points: readonly Vec2[];
+      readonly plane: { readonly origin: Vec3; readonly normal: Vec3 };
     })
   | (RecipeBase & {
       /** Boolean of two solids, run through the kernel. */

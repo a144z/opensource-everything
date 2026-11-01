@@ -279,6 +279,34 @@ export function withTranslation(base: readonly number[], delta: Vec3): number[] 
   });
 }
 
+/**
+ * The matrix to keep after a scale handle is released.
+ *
+ * A TransformControls scale handle scales about the object's centre, so letting
+ * its matrix through would also *move* the object by (centre − origin) × (s − 1)
+ * on every drag. SketchUp grows a face from the opposite face, leaving the object
+ * where the user put it: the scale factors are taken from the gizmo and the
+ * translation is restored exactly. The rotation is never taken from the gizmo,
+ * because a scale handle has none to offer and reading one back lets float error
+ * creep a placed object off its angle one drag at a time.
+ *
+ * A non-finite or zero factor keeps the base axis: a collapse is not a scale the
+ * document can hold, and refusing it here is safer than a NaN matrix later.
+ */
+export function withScaleFromDragged(base: readonly number[], dragged: readonly number[]): number[] {
+  const start = decompose(base);
+  const now = decompose(dragged);
+  const axis = (i: 0 | 1 | 2): number => {
+    const factor = now.scale[i];
+    return Number.isFinite(factor) && factor !== 0 ? factor : start.scale[i];
+  };
+  return compose({
+    rotation: start.rotation,
+    scale: [axis(0), axis(1), axis(2)],
+    translation: start.translation,
+  });
+}
+
 /** Scale about pivot, keeping rotation; scale factors compose. */
 export function withScale(base: readonly number[], factor: number | Vec3, pivot: Vec3 = [0, 0, 0]): number[] {
   const trs = decompose(base);

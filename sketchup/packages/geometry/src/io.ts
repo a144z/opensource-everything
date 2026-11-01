@@ -219,11 +219,19 @@ export function toDxf(polylines: readonly { name: string; points: readonly Vec2[
   return out.join("\n") + "\n";
 }
 
-/** Parse POLYLINE/VERTEX and LWPOLYLINE entities (closed polylines only). */
+/**
+ * Parse LWPOLYLINE and POLYLINE entities into closed rings.
+ *
+ * Only *closed* polylines are returned, and the `70` group code is what says so.
+ * An open polyline is a fence or a wall run, not a face: closing it would turn a
+ * drawing the user made into a face they never asked for, so it is skipped and
+ * `readImport` reports how many were skipped rather than pretending they arrived.
+ */
 export function fromDxf(text: string): Vec2[][] {
   const lines = text.split(/\r?\n/);
   const rings: Vec2[][] = [];
-  let current: Vec2[] | null = null;
+  /** The ring being filled, plus whether its entity said it is closed. */
+  let current: { points: Vec2[]; closed: boolean } | null = null;
   let inEntities = false;
   let pendingX: number | null = null;
   for (let i = 0; i + 1 < lines.length; i += 2) {
@@ -233,22 +241,29 @@ export function fromDxf(text: string): Vec2[][] {
     else if (code === "0" && value === "ENDSEC") inEntities = false;
     if (!inEntities) continue;
     if (code === "0") {
-      if (value === "VERTEX" && current) continue;
-      if (value === "LWPOLYLINE") {
-        current = [];
-        rings.push(current);
-      } else if (value === "POLYLINE") {
-        current = [];
-        rings.push(current);
-      } else if (value === "SEQEND" || value === "ENDSEC") {
+      // A new entity ends whatever ring was open.
+      if (current) {
+        if (current.closed && current.points.length >= 3) rings.push(current.points);
         current = null;
       }
+      pendingX = null;
+      if (value === "LWPOLYLINE" || value === "POLYLINE") {
+        current = { points: [], closed: false };
+      }
+      continue;
+    }
+    if (!current) continue;
+    if (code === "70") {
+      // Bit 1 is the closed flag; the other bits (spline-fit, 3D) do not matter
+      // because only the plan view is read.
+      current.closed = (Number.parseInt(value, 10) & 1) === 1;
     } else if (code === "10") {
       pendingX = Number(value);
-    } else if (code === "20" && pendingX !== null && current) {
-      current.push([pendingX, Number(value)]);
+    } else if (code === "20" && pendingX !== null) {
+      current.points.push([pendingX, Number(value)]);
       pendingX = null;
     }
   }
-  return rings.filter((r) => r.length >= 3);
+  if (current && current.closed && current.points.length >= 3) rings.push(current.points);
+  return rings;
 }

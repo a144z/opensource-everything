@@ -8,6 +8,7 @@ import {
   createBox,
   extrudeLoop,
   extrudeRect,
+  faceMesh,
   hashMesh,
   isClosedMesh,
   latheSolid,
@@ -31,6 +32,7 @@ export function isStandaloneRecipe(recipe: SolidRecipe): boolean {
     recipe.kind === "box" ||
     recipe.kind === "extrude" ||
     recipe.kind === "loop" ||
+    recipe.kind === "face" ||
     recipe.kind === "mesh" ||
     recipe.kind === "lathe"
   );
@@ -56,6 +58,8 @@ export function baseMesh(recipe: SolidRecipe): MeshData {
       );
     case "loop":
       return extrudeLoop(recipe.points, recipe.plane, recipe.distance);
+    case "face":
+      return faceMesh(recipe);
     case "mesh":
       return { positions: Float32Array.from(recipe.positions), indices: Uint32Array.from(recipe.indices) };
     case "lathe":

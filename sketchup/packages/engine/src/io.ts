@@ -62,12 +62,19 @@ type Upgrader = (raw: Raw) => Raw;
  * 4 -> 5: added the optional `definition` name on an `instance`. A 4-file's
  * instances are one-off references with no name, which is exactly what a missing
  * name means here, so the step only marks the file as understood.
+ *
+ * 5 -> 6: added the zero-thickness `face` recipe. A 5-file can hold no faces (it
+ * modelled them as 10 mm extrusions), so it upgrades by being understood. This is
+ * the first step that is not one-way: a 5-file opens here, but a 6-file that
+ * holds a face is refused by a 5 reader, which is why the version is raised
+ * rather than a face being smuggled in as a loop with distance 0.
  */
 const MIGRATIONS: Record<number, Upgrader> = {
   1: (raw) => ({ ...raw, schemaVersion: 2 }),
   2: (raw) => ({ ...raw, schemaVersion: 3 }),
   3: (raw) => ({ ...raw, schemaVersion: 4 }),
   4: (raw) => ({ ...raw, schemaVersion: 5 }),
+  5: (raw) => ({ ...raw, schemaVersion: 6 }),
 };
 
 export function deserialize(raw: unknown): DocumentState {
@@ -160,7 +167,8 @@ export function deserializeJson(text: string): DocumentState {
   return deserialize(parsed);
 }
 
-/** The ids a recipe points at. Kept here so the reader never disagrees with the session. */export function refsIn(recipe: SolidRecipe): readonly SolidId[] {
+/** The ids a recipe points at. Kept here so the reader never disagrees with the session. */
+export function refsIn(recipe: SolidRecipe): readonly SolidId[] {
   switch (recipe.kind) {
     case "boolean":
       return [recipe.a, recipe.b];
@@ -179,6 +187,7 @@ const KINDS = new Set<SolidRecipe["kind"]>([
   "box",
   "extrude",
   "loop",
+  "face",
   "boolean",
   "transform",
   "instance",
@@ -234,6 +243,20 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
         points,
         plane: { origin: nums(raw.plane.origin, 3, "plane.origin") as [number, number, number], normal: nums(raw.plane.normal, 3, "plane.normal") as [number, number, number] },
         distance: pos(raw.distance, "distance"),
+        matrix,
+      };
+    }
+    case "face": {
+      // A face is a ring and a plane, and nothing else: no `distance`, which is
+      // what makes it a surface. Refusing to invent one here is what keeps an
+      // opened file from quietly turning faces back into slabs.
+      if (!Array.isArray(raw.points) || raw.points.length < 3) throw new Error(`solid ${id} face needs 3+ points`);
+      const points = raw.points.map((p, i) => nums(p, 2, `points[${i}]`) as [number, number]);
+      if (!raw.plane) throw new Error(`solid ${id} face has no plane`);
+      return {
+        kind: "face",
+        points,
+        plane: { origin: nums(raw.plane.origin, 3, "plane.origin") as [number, number, number], normal: nums(raw.plane.normal, 3, "plane.normal") as [number, number, number] },
         matrix,
       };
     }

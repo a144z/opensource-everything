@@ -411,6 +411,55 @@ button.active {
   font-size: 12px;
 }
 
+/*
+  The measurement rail sits just above the hint: it is the number the user is
+  aiming with, so it gets the larger type, the tabular figures (so a value does
+  not jitter as digits change) and its own dark plate so a bright model behind
+  it cannot wash it out.
+*/
+#monitor {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #000c;
+  padding: 6px 14px;
+  border-radius: 5px;
+  border: 1px solid #4444;
+  color: var(--text, #e8e6e3);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  white-space: pre;
+  pointer-events: none;
+}
+
+#monitor[hidden] {
+  display: none;
+}
+
+/*
+  The draft badge is a fact, not an alarm: quiet dim type that lives with the
+  keys line, so "a draft exists" is discoverable without ever flashing.
+*/
+.draft-badge {
+  color: var(--dim);
+  font-size: 11px;
+  padding: 4px 0 0;
+}
+
+.draft-badge[hidden] {
+  display: none;
+}
+
+.keys-line {
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 0;
+  max-width: 900px;
+}
+
 footer {
   color: var(--dim);
   font-size: 11px;

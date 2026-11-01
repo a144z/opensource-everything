@@ -9,9 +9,14 @@
  * solid it has already built while still rebuilding one whose geometry moved.
  */
 
-import type { Solid, SolidId } from "./types.js";
+import type { Solid, SolidId, SolidMeta } from "./types.js";
 
-/** What changed between two documents. `SessionChange` adds the cause on top. */export type SolidDiff = {
+/**
+ * What changed between two documents. Exists so `SessionChange` (session.ts)
+ * can add its cause (`kind`, `touched`) on top of one shared shape, and so a
+ * listener can be typed without importing the whole `Session` module.
+ */
+export type SolidDiff = {
   /** Ids that now exist and did not before. */
   readonly added: readonly SolidId[];
   /** Ids that existed before and after, with new content or metadata. */
@@ -22,18 +27,18 @@ import type { Solid, SolidId } from "./types.js";
   readonly label: string;
 };
 
-export const EMPTY_CHANGE: SolidDiff = { added: [], updated: [], removed: [], label: "" };
-
-export function isEmptyChange(change: SolidDiff): boolean {
-  return change.added.length === 0 && change.updated.length === 0 && change.removed.length === 0;
-}
-
 /**
  * What differs between two documents, ignoring order.
  *
  * A solid counts as updated when its revision or metadata moved. Recipe content
  * is not deep-compared: a recipe change always arrives with a revision bump, so
- * trusting the counter is both cheaper and never misses an edit.
+ * trusting the counter is both cheaper and never misses an edit. Metadata is
+ * still compared because a label-only edit (rename, tag) is cheap to see and a
+ * renderer only needs to repaint it — the revision check alone would report it
+ * as updated anyway, this makes the two cases distinguishable.
+ *
+ * The only consumer is `Session` (execute / batch / undo / redo / load), which
+ * turns the result into a `SessionChange` and emits it.
  */
 export function diffSolids(
   before: ReadonlyMap<SolidId, Solid>,
@@ -46,21 +51,27 @@ export function diffSolids(
   for (const [id, solid] of after) {
     const old = before.get(id);
     if (!old) added.push(id);
-    else if (old.revision !== solid.revision || !sameMeta(old, solid)) updated.push(id);
+    else if (old.revision !== solid.revision || !sameMeta(old.meta, solid.meta)) updated.push(id);
   }
   for (const id of before.keys()) if (!after.has(id)) removed.push(id);
   return { added, updated, removed, label };
 }
 
-function sameMeta(a: Solid, b: Solid): boolean {
+/**
+ * Field-by-field equality of the two metadata records. Compares every field
+ * (rather than the object identity) because a command rebuilds `meta` from a
+ * spread even when it writes back the same value; comparing references would
+ * turn those no-ops into "updated" reports.
+ */
+function sameMeta(a: SolidMeta, b: SolidMeta): boolean {
   return (
-    a.meta.name === b.meta.name &&
-    a.meta.color === b.meta.color &&
-    a.meta.hidden === b.meta.hidden &&
-    a.meta.locked === b.meta.locked &&
-    a.meta.opacity === b.meta.opacity &&
-    a.meta.roughness === b.meta.roughness &&
-    a.meta.metallic === b.meta.metallic &&
-    a.meta.tag === b.meta.tag
+    a.name === b.name &&
+    a.color === b.color &&
+    a.hidden === b.hidden &&
+    a.locked === b.locked &&
+    a.opacity === b.opacity &&
+    a.roughness === b.roughness &&
+    a.metallic === b.metallic &&
+    a.tag === b.tag
   );
 }

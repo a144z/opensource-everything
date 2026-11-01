@@ -24,6 +24,7 @@ import {
   setMeta,
   translateSolid,
   translateSolids,
+  withScaleFromDragged,
   type SolidId,
   type SolidRecipe,
 } from "../src/index.js";
@@ -226,6 +227,65 @@ describe("scale about a grabbed point", () => {
     s.execute(scaleAbout([id], 1, [5, 5, 5]));
     expect(s.hash()).toBe(hashOpen);
     expect(hash).toBeTruthy();
+  });
+});
+
+describe("scale gizmo commit (withScaleFromDragged)", () => {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+  it("keeps the object where it was when the gizmo scaled about its centre", () => {
+    // A 10 mm box whose origin is at x = 100, scaled ×2 about its own centre:
+    // TransformControls would move the origin from 100 to 95. It must stay 100.
+    const start = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1];
+    const draggedAboutCentre = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 95, 0, 0, 1];
+    const kept = withScaleFromDragged(start, draggedAboutCentre);
+    expect(kept[12]).toBeCloseTo(100, 9);
+    expect(kept[13]).toBeCloseTo(0, 9);
+    expect(kept[14]).toBeCloseTo(0, 9);
+    expect(kept[0]).toBeCloseTo(2, 9);
+    expect(kept[5]).toBeCloseTo(2, 9);
+    expect(kept[10]).toBeCloseTo(2, 9);
+  });
+
+  it("takes one axis at a time and leaves the others alone", () => {
+    const start = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const dragged = [1.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1];
+    const kept = withScaleFromDragged(start, dragged);
+    expect(kept[0]).toBeCloseTo(1.5, 9);
+    expect(kept[5]).toBeCloseTo(1, 9);
+    expect(kept[10]).toBeCloseTo(1, 9);
+    expect([kept[12], kept[13], kept[14]]).toEqual([0, 0, 0]);
+  });
+
+  it("keeps the base rotation, so float error cannot creep a placed object off its angle", () => {
+    // 30° about Z, at the origin.
+    const c = Math.cos(Math.PI / 6);
+    const sn = Math.sin(Math.PI / 6);
+    const start = [c, sn, 0, 0, -sn, c, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1];
+    // The gizmo reports a rotation a hair off, plus a translation from the scale.
+    const dragged = [2 * (c + 1e-9), 2 * (sn - 1e-9), 0, 0, -2 * (sn + 1e-9), 2 * (c - 1e-9), 0, 0, 0, 0, 2, 0, 7, 17, 0, 1];
+    const kept = withScaleFromDragged(start, dragged);
+    const basis = [kept[0]!, kept[1]!, kept[4]!, kept[5]!];
+    expect(basis[0]).toBeCloseTo(c, 12);
+    expect(basis[1]).toBeCloseTo(sn, 12);
+    expect(basis[2]).toBeCloseTo(-sn, 12);
+    expect(basis[3]).toBeCloseTo(c, 12);
+    expect([kept[12], kept[13]]).toEqual([10, 20]);
+  });
+
+  it("refuses a collapse: a zero or non-finite factor keeps the base axis", () => {
+    const start = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const dragged = [0, 0, 0, 0, 0, Number.NaN, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1];
+    const kept = withScaleFromDragged(start, dragged);
+    expect(kept[0]).toBeCloseTo(1, 9);
+    expect(kept[5]).toBeCloseTo(1, 9);
+    expect(kept[10]).toBeCloseTo(3, 9);
+    expect(kept.every((n) => Number.isFinite(n))).toBe(true);
+  });
+
+  it("an identity drag changes nothing", () => {
+    const start = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1];
+    expect(withScaleFromDragged(start, identity)).toEqual(start);
   });
 });
 

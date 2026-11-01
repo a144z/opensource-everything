@@ -4,14 +4,15 @@ import {
   circlePoints,
   closedArc,
   counterClockwise,
-  formatLength,
   parseLength,
   polygonPoints,
   polylineLength,
   type Vec2,
   type Vec3,
 } from "@apexus/geometry";
+import { formatLengthIn } from "./display.js";
 import {
+  addFace as addFaceCmd,
   addSolid as addSolidCmd,
   angleFromText,
   deltaFromText,
@@ -28,10 +29,21 @@ import {
   type Axis,
   type Session,
   type SolidId,
+  type SolidMeta,
   type SolidRecipe,
 } from "@apexus/engine";
 import type { View, PickHit, Tool } from "./view.js";
 import type { Snapper } from "./snap.js";
+import {
+  angleOnGround,
+  angleValue,
+  formatAngle,
+  lengthValue,
+  rectangleSize,
+  round2,
+  sizeValue,
+  type MeasureValue,
+} from "./measure.js";
 
 /**
  * Tool layer. Owns transient interaction state (a half-drawn rectangle, a Pending
@@ -174,6 +186,30 @@ export class ToolController {
   #rotateAxis: Axis = "z";
   /** Side count for the next polygon; typed digits change it. */
   #polygonSides = 6;
+  /** The last number the active tool measured, shown in the status line. */
+  #measure: MeasureValue | null = null;
+  /** Shift held over a rectangle: the next two edges stay equal. */
+  #square = false;
+
+  /** Typed digits that name a rectangle size, or null when they do not yet. */
+  #typedSize(): readonly [number, number] | null {
+    if (this.#typed === "") return null;
+    const parts = this.#typed.split(",").map((p) => parseLength(p.trim(), this.#host.unit())?.mm);
+    if (parts.length === 2 && parts.every((n) => n !== undefined && n > 0)) return [parts[0]!, parts[1]!];
+    if (parts.length === 1 && parts[0] !== undefined && parts[0] > 0) {
+      // One number names both edges only where a square is already implied.
+      return this.#square ? [parts[0]!, parts[0]!] : null;
+    }
+    return null;
+  }
+
+  /**
+   * Shift is the square grip: it must be readable *before* the next mouse move,
+   * so the host tells the tool rather than the tool asking on every frame.
+   */
+  setModifiers(mods: { shift?: boolean }): void {
+    this.#square = mods.shift ?? false;
+  }
 
   /** Show the side count as it is typed, and adopt it live where it is valid. */
   #applyPolygonSides(): void {
@@ -299,8 +335,11 @@ export class ToolController {
       return true;
     }
     if (key === "Enter" && this.#typed) {
+      // The size path clears its own text: it has just built the face, so a
+      // stale "600,400" must not be re-applied to the next rectangle.
       this.#applyTyped(true);
       this.#typed = "";
+      this.#measure = null;
       return true;
     }
     if (key === "Backspace" && this.#typed) {
@@ -332,7 +371,7 @@ export class ToolController {
       const parsed = p ? parseLength(p, unit) : null;
       return parsed ? parsed.mm.toFixed(1) : "?";
     });
-    this.#host.setHint(`Move by X ${shown[0] ?? "0"}, Y ${shown[1] ?? "0"}, Z ${shown[2] ?? "0"} mm (Enter to apply; commas separate axes)`);
+    this.#host.setHint(`Move by X ${shown[0] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[0].mm)}, Y ${shown[1] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[1].mm)}, Z ${shown[2] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[2].mm)} (Enter to apply; commas separate axes)`);
   }
 
   /** Enter on a typed offset: one batched command, so one undo step. */
@@ -396,8 +435,23 @@ export class ToolController {
   #applyTyped(commit = false): void {
     const p = this.#pending;
     const parsed = this.#typed ? parseLength(this.#typed, this.#host.unit()) : null;
+    // A rectangle is the one shape where typing two numbers is natural, so
+    // `600,400` is read before the single-length path would refuse it.
+    const pair = p?.kind === "rect" ? this.#typedSize() : null;
+    if (pair) {
+      const sx = Math.sign(p!.current[0] - p!.start[0]) || 1;
+      const sy = Math.sign(p!.current[1] - p!.start[1]) || 1;
+      p!.current = [p!.start[0] + sx * pair[0], p!.start[1] + sy * pair[1]];
+      this.#drawRect(p!.start, p!.current);
+      this.#measure = sizeValue("Width × Depth", pair, this.#host.unit(), "", "typed");
+      this.#host.setHint("");
+      if (commit) this.#commitRect(p!);
+      return;
+    }
     this.#host.setHint(
-      parsed ? `${this.#typed}  ${parsed.mm.toFixed(1)} mm (Enter to apply)` : `Type a length: ${this.#typed || ""}`,
+      parsed
+        ? `${this.#typed}  ${formatLengthIn(this.#host.unit(), parsed.mm)} (Enter to apply)`
+        : `Type a length: ${this.#typed || ""}`,
     );
     if (!p) return;
     if (p.kind === "rect" && parsed) {
@@ -446,7 +500,7 @@ export class ToolController {
         this.#setPreview(
           quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]),
         );
-        this.#host.setHint(`Rotated rectangle depth ${fmt(parsed.mm)} mm (Enter to finish, Esc cancels)`);
+        this.#host.setHint(`Rotated rectangle depth ${formatLengthIn(this.#host.unit(), parsed.mm)} (Enter to finish, Esc cancels)`);
         if (commit) {
           const width = Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
           const degrees = (Math.atan2(p.corner[1] - p.start[1], p.corner[0] - p.start[0]) * 180) / Math.PI;
@@ -471,7 +525,7 @@ export class ToolController {
           quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]),
         );
         this.#host.setHint(
-          `Rotated rectangle base ${fmt(width.mm)} mm at ${degrees.toFixed(1)} deg. ` +
+          `Rotated rectangle base ${formatLengthIn(this.#host.unit(), width.mm)} at ${degrees.toFixed(1)} deg. ` +
             `Type "depth" or click to set the depth, Esc cancels`,
         );
       } else {
@@ -489,15 +543,39 @@ export class ToolController {
 
   /* ----------------------------------------------------------- mouse flow */
 
+  /**
+   * The number under the cursor, as the tool's last `hover`/`drag` computed it.
+   * Tools that do not yet publish one leave the previous reading alone, so the
+   * status line only ever shows numbers the tool actually measured.
+   */
+  measure(): MeasureValue | null {
+    return this.#measure;
+  }
+
   hover(point: Vec3 | null, clientX: number, clientY: number): void {
     this.#hover = point;
     const p = this.#pending;
     if (p?.kind === "rect" && point) {
-      p.current = [point[0], point[1]];
+      const sx = Math.abs(point[0] - p.start[0]);
+      const sy = Math.abs(point[1] - p.start[1]);
+      // Shift makes a rectangle square, the way a corner grip does. The typed
+      // size is what wins, so a square stays square while digits are entered.
+      const side = Math.max(sx, sy);
+      if (this.#square) {
+        p.current = [p.start[0] + Math.sign(point[0] - p.start[0] || 1) * side, p.start[1] + Math.sign(point[1] - p.start[1] || 1) * side];
+      } else {
+        p.current = [point[0], point[1]];
+      }
       this.#drawRect(p.start, p.current);
-      this.#host.setHint(
-        `Rectangle ${fmt(Math.abs(p.current[0] - p.start[0]))}  ${fmt(Math.abs(p.current[1] - p.start[1]))} mm  click to finish, Esc cancels`,
-      );
+      // A typed size is an override: the cursor must not erase what the user
+      // just typed, so the reading keeps showing it until they clear it.
+      const typed = this.#typedSize();
+      if (typed) {
+        this.#measure = sizeValue("Width × Depth", typed, this.#host.unit(), "Enter to build", "typed");
+      } else {
+        this.#measure = sizeValue("Width × Depth", rectangleSize(p.start, p.current), this.#host.unit(), "click to finish", "proposed");
+      }
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "pull") {
       this.drag(clientX, clientY);
     } else if (p?.kind === "line" || p?.kind === "tape" || p?.kind === "dimension") {      const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
@@ -507,36 +585,31 @@ export class ToolController {
       p.current = to;
       this.#drawSpan(p.from, to);
       const label = p.kind === "tape" ? "Tape" : p.kind === "dimension" ? "Dimension" : "Line";
-      this.#host.setHint(
-        `${label} ${fmt(distance(p.from, to))} mm  ${this.#glyphHint()} click to finish, Esc cancels`,
-      );
+      this.#measure = lengthValue(label, distance(p.from, to), this.#host.unit(), `${this.#glyphHint()} click to finish`.trim());
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "circle") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.centre, GLOSSARY_UP);
       if (!pt) return;
       p.current = this.#snap(pt).point;
       this.#drawCircle(p.centre, distance(p.centre, p.current));
-      this.#host.setHint(
-        `Circle radius ${fmt(distance(p.centre, p.current))} mm  ${this.#glyphHint()} click to place, Esc cancels`,
-      );
+      this.#measure = lengthValue("Radius", distance(p.centre, p.current), this.#host.unit(), `${this.#glyphHint()} click to place`.trim());
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "polygon") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.centre, GLOSSARY_UP);
       if (!pt) return;
       p.current = this.#snap(pt).point;
       const radius = distance(p.centre, p.current);
       this.#drawPolygon(p.centre, p.current, radius, p.sides);
-      this.#host.setHint(
-        `Polygon ${p.sides} sides, radius ${fmt(radius)} mm  ${this.#glyphHint()} click to place, Esc cancels`,
-      );
+      this.#measure = lengthValue(`Radius, ${p.sides} sides`, radius, this.#host.unit(), `${this.#glyphHint()} click to place`.trim());
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "arc") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.points[0]!, GLOSSARY_UP);
       if (!pt) return;
       p.current = this.#snap(pt).point;
       const ring = arcPoints(p.points, p.current);
       this.#setPreview(this.#ring3(ring));
-      this.#host.setHint(
-        `Arc ${fmt(polylineLength(ring))} mm  ${this.#glyphHint()} ` +
-          `${p.points.length === 1 ? "click a point on the arc" : "click the end point"}, Esc cancels`,
-      );
+      this.#measure = lengthValue("Arc length", polylineLength(ring), this.#host.unit(), p.points.length === 1 ? "click a point on the arc" : "click the end point");
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "follow" && point) {
       p.current = point;
       const last = p.path[p.path.length - 1]!;
@@ -545,9 +618,9 @@ export class ToolController {
     } else if (p?.kind === "offset") {
       p.current = p.base + this.#anchorDelta(p.id, clientX, clientY);
       this.#drawOffset(p);
-      this.#host.setHint(
-        `Offset ${fmt(p.base)} -> ${fmt(p.current)} mm  click to apply, Esc cancels`,
-      );
+      const shown = p.current - p.base;
+      this.#measure = lengthValue(shown < 0 ? "Offset inward" : "Offset outward", Math.abs(shown), this.#host.unit(), "click to apply");
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "move" || p?.kind === "rotate") {
       const plane = p.kind === "move" ? { at: p.from, n: p.planeNormal } : { at: p.pivot, n: GLOSSARY_UP };
       const pt = this.#host.view.planePoint(clientX, clientY, plane.at, plane.n);
@@ -557,35 +630,29 @@ export class ToolController {
       this.#drawSpan(p.kind === "move" ? p.from : p.pivot, p.current);
       if (p.kind === "move") {
         const d = sub3(p.current, p.from);
-        this.#host.setHint(
-          `Move ${fmt(Math.hypot(d[0], d[1], d[2]))} mm  ${this.#glyphHint()} ` +
-            `${p.copy ? "" : "hold Ctrl for copy, "}click to apply, Esc cancels`,
-        );
+        this.#measure = lengthValue("Distance", Math.hypot(d[0], d[1], d[2]), this.#host.unit(), `${this.#glyphHint()} ${p.copy ? "" : "Ctrl = copy, "}click to apply`.trim());
       } else {
-        this.#host.setHint(
-          `Rotate ${this.#angle(p, p.current).toFixed(1)} deg  ${this.#glyphHint()} click to apply, Esc cancels`,
-        );
+        this.#measure = angleValue(this.#angle(p, p.current), `${this.#glyphHint()} click to apply`.trim());
       }
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "rrect") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.start, GLOSSARY_UP);
       if (!pt) return;
       p.current = this.#snap(pt).point;
       const quad = rotatedRectQuad(p.start, p.corner, p.current);
       this.#setPreview(quad.map((q) => new THREE.Vector3(q[0], q[1], 0.5)).concat([new THREE.Vector3(quad[0]![0], quad[0]![1], 0.5)]));
-      this.#host.setHint(
-        `Rotated rectangle ${fmt(Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]))} x ` +
-          `${fmt(Math.hypot(p.current[0] - p.corner[0], p.current[1] - p.corner[1]))} mm  ` +
-          `type width,angle to be exact, click to finish, Esc cancels`,
-      );
+      const base = Math.hypot(p.corner[0] - p.start[0], p.corner[1] - p.start[1]);
+      const depth = Math.hypot(p.current[0] - p.corner[0], p.current[1] - p.corner[1]);
+      this.#measure = sizeValue("Width × Depth", [round2(base), round2(depth)], this.#host.unit(), "type width,angle to be exact");
+      this.#host.setHint("Esc cancels");
     } else if (p?.kind === "scale") {
       const pt = this.#host.view.planePoint(clientX, clientY, p.pivot, GLOSSARY_UP);
       if (!pt) return;
       p.current = this.#snap(pt).point;
       const factor = Math.hypot(p.current[0] - p.pivot[0], p.current[1] - p.pivot[1]) / p.base;
       this.#drawSpan(p.pivot, this.#constrain(p.pivot, p.current));
-      this.#host.setHint(
-        `Scale x${factor.toFixed(3)}  ${this.#glyphHint()} click to apply, Esc cancels`,
-      );
+      this.#measure = { phase: "proposed", label: "Scale", text: `×${factor.toFixed(3)}`, prompt: `${this.#glyphHint()} click to apply`.trim() };
+      this.#host.setHint("Esc cancels");
     }
   }
 
@@ -665,7 +732,8 @@ export class ToolController {
     p.current = pt;
     const distance = p.baseDistance + d;
     this.#drawPull(p, distance - p.baseDistance);
-    this.#host.setHint(`Push/Pull ${fmt(distance)} mm  click or release to apply, Esc cancels`);
+    this.#measure = lengthValue("Push/Pull", distance, this.#host.unit(), "click or release to apply");
+    this.#host.setHint("Esc cancels");
   }
 
   /* ------------------------------------------------------------- snapping */
@@ -707,7 +775,7 @@ export class ToolController {
       const radius = distance(p.centre, p.current);
       if (radius < 0.5) return;
       const ring = circlePoints(p.centre, p.current, radius);
-      this.#addLoop(ring, 10, `Circle r${fmt(radius)}`);
+      this.#addFace(ring, `Circle r${fmt(radius)}`);
       return;
     }
     const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
@@ -728,7 +796,7 @@ export class ToolController {
       const radius = distance(p.centre, p.current);
       if (radius < 0.5) return;
       const ring = polygonPoints(p.centre, p.current, radius, p.sides);
-      this.#addLoop(ring, 10, `Polygon ${p.sides}s r${fmt(radius)}`);
+      this.#addFace(ring, `Polygon ${p.sides}s r${fmt(radius)}`);
       return;
     }
     const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
@@ -752,8 +820,8 @@ export class ToolController {
         this.#cancel();
         const ring = arcPoints(p.points, null);
         if (polylineLength(ring) < 0.5) return;
-        // An open path is closed back to the chord so it extrudes into a solid.
-        this.#addLoop(closedArc(ring), 10, "Arc");
+        // An open path is closed back to the chord so it reads as one surface.
+        this.#addFace(closedArc(ring), "Arc");
       }
       return;
     }
@@ -761,17 +829,22 @@ export class ToolController {
     this.#host.setHint("Arc: click a point the arc passes through, then its end, Esc cancels");
   }
 
-  /** One place where a closed path on the ground becomes geometry. */
-  #addLoop(ring: readonly Vec2[], thickness: number, name: string): void {
-    const recipe: SolidRecipe = {
-      kind: "loop",
-      points: counterClockwise(ring),
-      plane: { origin: [0, 0, 0], normal: [0, 0, 1] },
-      distance: thickness,
-      matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-    };
+  /**
+   * One place where a closed path becomes a face: the circle, polygon and arc
+   * tools all end here.
+   *
+   * The result is a zero-thickness face, not a 10 mm slab wearing a "Face" name.
+   * A drawn outline is a surface until someone pushes it, and a face says so:
+   * it has an area and no volume, so a bill of quantities, the snap solver and a
+   * saved file all read it for what it is. Push/pull is what turns it into a
+   * solid, along the ring's own normal.
+   *
+   * The ring is always on the ground: every caller builds it from snapped ground
+   * points, so a matrix would only be a second way to say where the ground is.
+   */
+  #addFace(ring: readonly Vec2[], name: string): void {
     try {
-      const patch = this.#host.session.execute(addSolidCmd(recipe, { name }));
+      const patch = this.#host.session.execute(addFaceCmd(counterClockwise(ring), GROUND_PLANE, { name }));
       const added = [...patch.forward.keys()][0];
       if (added) {
         this.#lastPullId = added;
@@ -812,22 +885,28 @@ export class ToolController {
     this.#host.setHint("Rectangle: click the opposite corner (type a size, Esc cancels)");
   }
 
+  /**
+   * The rectangle tool's result, the gesture SketchUp starts every model with.
+   *
+   * It is a zero-thickness face: four corners on the ground, nothing else. The
+   * tool then hands over to push/pull, because a face is the base of a solid and
+   * the drag that follows is what gives it a height. Building an extrude here
+   * instead made the "face" a 10 mm slab the user never asked for.
+   */
   #commitRect(p: Extract<Pending, { kind: "rect" }>): void {
     this.#cancel();
     const w = Math.abs(p.current[0] - p.start[0]);
     const h = Math.abs(p.current[1] - p.start[1]);
     if (w < 0.5 || h < 0.5) return;
     const origin: Vec3 = [Math.min(p.start[0], p.current[0]), Math.min(p.start[1], p.current[1]), 0];
-    const recipe: SolidRecipe = {
-      kind: "extrude",
-      profile: { width: w, height: h },
-      normal: [0, 0, 1],
-      origin,
-      distance: 10,
-      matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-    };
+    const ring: Vec2[] = [
+      [origin[0], origin[1]],
+      [origin[0] + w, origin[1]],
+      [origin[0] + w, origin[1] + h],
+      [origin[0], origin[1] + h],
+    ];
     try {
-      const patch = this.#host.session.execute(addSolidCmd(recipe, { name: `Face ${fmt(w)}x${fmt(h)}` }));
+      const patch = this.#host.session.execute(addFaceCmd(ring, GROUND_PLANE, { name: `Face ${fmt(w)}x${fmt(h)}` }));
       const added = [...patch.forward.keys()][0];
       if (added) {
         this.#lastPullId = added;
@@ -840,6 +919,14 @@ export class ToolController {
     }
   }
 
+  /**
+   * Push/pull: click a face or a face's solid, then drag along its normal.
+   *
+   * A face has no height yet, so its drag starts from zero and the release turns
+   * it into an extrusion of the same ring; a solid already extruded adds to the
+   * height it has. Everywhere else in this tool the difference is invisible:
+   * `pullFace` owns the conversion, and the app only ever names a target distance.
+   */
   #clickPull(hit: PickHit, clientX: number, clientY: number): void {
     const p = this.#pending;
     if (p?.kind === "pull") {
@@ -852,8 +939,8 @@ export class ToolController {
       return;
     }
     const solid = this.#host.session.document.solids.get(hit.id);
-    const recipe = solid?.recipe;
-    if (!recipe || (recipe.kind !== "extrude" && recipe.kind !== "loop")) {
+    const base = solid ? pullableDistance(solid.recipe) : null;
+    if (base === null) {
       this.#host.setHint("Push/Pull works on extruded faces; boxes are edited from the panel for now.");
       return;
     }
@@ -863,7 +950,7 @@ export class ToolController {
       faceNormal: hit.faceNormal,
       planeOrigin: hit.point,
       start: hit.point,
-      baseDistance: recipe.distance,
+      baseDistance: base,
       current: hit.point,
       typed: null,
     };
@@ -876,16 +963,19 @@ export class ToolController {
     this.#pending = null;
     this.#clearPreview();
     const solid = this.#host.session.document.solids.get(p.id);
-    const recipe = solid?.recipe;
-    if (!recipe || (recipe.kind !== "extrude" && recipe.kind !== "loop")) return;
+    const base = solid ? pullableDistance(solid.recipe) : null;
+    if (base === null) return;
     const target = p.typed ?? p.baseDistance + delta;
-    if (!(target > 0.1) || Math.abs(target - recipe.distance) < 0.01) {
+    if (!(target > 0.1) || Math.abs(target - base) < 0.01) {
       this.#host.setHint("Push/Pull cancelled.");
       return;
     }
     try {
-      this.#host.session.execute(pullFaceCmd(p.id, { ...recipe, distance: target }));
-      this.#host.setHint(`Push/Pull done: ${fmt(target)} mm`);
+      // The distance, not a recipe: `pullFace` picks the right shapes to change
+      // for a face (convert) and for a solid (resize), so the maths is not
+      // copied here where it would be free to drift.
+      this.#host.session.execute(pullFaceCmd(p.id, target));
+      this.#host.setHint(`Push/Pull done: ${formatLengthIn(this.#host.unit(), target)}`);
     } catch (err) {
       this.#host.setHint((err as Error).message);
     }
@@ -927,7 +1017,7 @@ export class ToolController {
           { name: `Guide ${fmt(length)}`, color: "#5b7083" },
         ),
       );
-      this.#host.setHint(`Line ${fmt(length)} mm drawn.`);
+      this.#host.setHint(`Line ${formatLengthIn(this.#host.unit(), length)} drawn.`);
     } catch (err) {
       this.#host.setHint((err as Error).message);
     }
@@ -951,7 +1041,7 @@ export class ToolController {
     this.#cancel();
     const d = distance(p.from, p.current);
     this.#host.setHint(
-      `Distance: ${fmt(d)} mm  (${formatLength(d, this.#host.unit())})  dx ${fmt(p.current[0] - p.from[0])} dy ${fmt(p.current[1] - p.from[1])} dz ${fmt(p.current[2] - p.from[2])}`,
+      `Distance: ${formatLengthIn(this.#host.unit(), d)}  dx ${fmt(p.current[0] - p.from[0])} dy ${fmt(p.current[1] - p.from[1])} dz ${fmt(p.current[2] - p.from[2])}`,
     );
   }
 
@@ -980,7 +1070,7 @@ export class ToolController {
     // reads its height rather than the diagonal.
     const note = makeAnnotation({ a: p.from, b: p.current, axis: guessAxis(p.from, p.current) });
     this.#host.annotate(note);
-    this.#host.setHint(`Dimension ${fmt(span)} mm added (${note.axis}). It does not affect the fit check.`);
+    this.#host.setHint(`Dimension ${formatLengthIn(this.#host.unit(), span)} added (${note.axis}). It does not affect the fit check.`);
   }
 
   /* ------------------------------------------------------------ follow me */
@@ -1030,7 +1120,7 @@ export class ToolController {
           return;
         }
         this.#host.session.execute(pullFaceCmd(p.profileId, { ...recipe, distance: recipe.distance + along }));
-        this.#host.setHint(`Follow Me: swept ${fmt(along)} mm.`);
+        this.#host.setHint(`Follow Me: swept ${formatLengthIn(this.#host.unit(), along)}.`);
       } else {
         this.#host.session.execute(translateSolids([p.profileId], delta));
         this.#host.setHint("Follow Me: moved the object along the path.");
@@ -1110,7 +1200,7 @@ export class ToolController {
           ids.map((id) => (p.copy ? duplicateSolid(id, delta) : translateSolids([id], delta))),
         );
         this.#host.setHint(
-          `${p.copy ? "Copied" : "Moved"} ${ids.length} object(s) ${fmt(Math.hypot(delta[0], delta[1], delta[2]))} mm.`,
+          `${p.copy ? "Copied" : "Moved"} ${ids.length} object(s) ${formatLengthIn(this.#host.unit(), Math.hypot(delta[0], delta[1], delta[2]))}.`,
         );
       } catch (err) {
         this.#host.setHint((err as Error).message);
@@ -1218,7 +1308,14 @@ export class ToolController {
     this.#buildRotatedRect(width, Math.max(depth, 0.1), p.start, angle);
   }
 
-  /** One place where a placed rotated rectangle becomes geometry. */
+  /**
+   * One place where a placed rotated rectangle becomes geometry.
+   *
+   * A rotated rectangle is still a rectangle, so it is still a face. The ring is
+   * wound once and the face's normal turned into world space by `turnOnGround`:
+   * winding alone does not survive a rotation, and a face lit from underneath
+   * would be invisible from above.
+   */
   #buildRotatedRect(width: number, depth: number, start: Vec3, degrees: number): void {
     if (width < 0.5 || depth < 0.5) {
       this.#host.setHint("Rotated rectangle: both sides must be at least 0.5 mm.");
@@ -1231,17 +1328,10 @@ export class ToolController {
       [width, -depth],
       [0, -depth],
     ];
-    const recipe: SolidRecipe = {
-      kind: "loop",
-      points: counterClockwise(local),
-      plane: { origin: [0, 0, 0], normal: [0, 0, 1] },
-      distance: 10,
-      matrix: placeOnGround(start, degrees),
-    };
+    const name = `Rect ${fmt(width)}x${fmt(depth)} @ ${degrees.toFixed(0)}`;
+    const plane = { origin: start, normal: turnOnGround(degrees) };
     try {
-      const patch = this.#host.session.execute(
-        addSolidCmd(recipe, { name: `Rect ${fmt(width)}x${fmt(depth)} @ ${degrees.toFixed(0)}` }),
-      );
+      const patch = this.#host.session.execute(addFaceCmd(counterClockwise(local), plane, { name }));
       const added = [...patch.forward.keys()][0];
       if (added) {
         this.#lastPullId = added;
@@ -1322,6 +1412,7 @@ export class ToolController {
   #cancel(): void {
     this.#pending = null;
     this.#typed = "";
+    this.#measure = null;
     this.#clearPreview();
   }
 
@@ -1413,6 +1504,8 @@ const HINTS: Record<Tool, string> = {
 const GRID_MM = 10;
 /** Plane normal for ground-plane interactions (move/rotate). */
 const GLOSSARY_UP: Vec3 = [0, 0, 1];
+/** The ground plane a tool-drawn face lies in; faces carry no matrix of their own. */
+const GROUND_PLANE: { readonly origin: Vec3; readonly normal: Vec3 } = { origin: [0, 0, 0], normal: GLOSSARY_UP };
 /** Height of a guide line's band, small enough to read as a line not a solid. */
 const LINE_GUIDE_WIDTH = 0.5;
 
@@ -1518,15 +1611,28 @@ function parseFactor(text: string): number {
 }
 
 /**
- * Column-major matrix placing a ground-plane profile whose local origin is at
- * `at`, turned `degrees` about the vertical axis. Matches the engine's own
- * convention (`rotateZ` then translate), so a recipe built this way needs no
- * special case in resolution or in `.fcproj` round-trips.
+ * The up vector turned `degrees` about the vertical.
+ *
+ * A rotated rectangle is built as a face with no matrix: its own normal would
+ * otherwise stay world-up while the ring turned, and a plane whose normal is not
+ * perpendicular to it would skew every point lifted off it.
  */
-function placeOnGround(at: Vec3, degrees: number): number[] {
+function turnOnGround(degrees: number): Vec3 {
   const r = (degrees * Math.PI) / 180;
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, at[0], at[1], at[2], 1];
+  return [-Math.sin(r), Math.cos(r), 0];
+}
+
+/**
+ * What push/pull starts from: the height a recipe already has.
+ *
+ * A face has no `distance` because it has no thickness yet, so it reads as zero.
+ * Returning zero rather than null is what makes one code path serve both cases:
+ * the drag adds to nothing and the release asks for the height it drew. Null
+ * means there is nothing to grow — a box or a mesh — and the caller says so.
+ */
+export function pullableDistance(recipe: SolidRecipe): number | null {
+  if (recipe.kind === "face") return 0;
+  if (recipe.kind === "extrude" || recipe.kind === "loop") return recipe.distance;
+  return null;
 }
 

@@ -12,10 +12,12 @@ import {
   lassoDirection,
   selectByDrag,
   selectByLasso,
+  withScaleFromDragged,
   type ScreenBox,
   type Session,
   type Solid,
   type SolidId,
+  type SolidRecipe,
 } from "@apexus/engine";
 
 /**
@@ -67,7 +69,7 @@ export type PickHit =
 
 export interface ViewEvents {
   onPick(hit: PickHit, additive: boolean, copy?: boolean): void;
-  onHover(point: Vec3 | null): void;
+  onHover(point: Vec3 | null, shift: boolean): void;
   /** A rectangle drag finished without hitting anything: ids the drag selected. */
   onMarquee(ids: readonly SolidId[], additive: boolean): void;
   /** Gizmo finished a drag: the object's new world matrix, column-major. */
@@ -81,6 +83,8 @@ interface CachedMesh {
   mesh: THREE.Mesh;
   edges: THREE.LineSegments;
   baseColor: THREE.Color;
+  /** A face has no thickness, so it needs the face-only style rules. */
+  flat: boolean;
 }
 
 export class View {
@@ -162,6 +166,11 @@ export class View {
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
     this.gizmo.setSize(0.85);
     this.gizmo.setSpace("world");
+    // Scale handles are per axis, the way SketchUp's corner and edge grips are:
+    // a drag that moved one axis must not quietly scale the other two.
+    this.gizmo.showX = true;
+    this.gizmo.showY = true;
+    this.gizmo.showZ = true;
     this.gizmo.addEventListener("dragging-changed", (e) => {
       const dragging = (e as unknown as { value: boolean }).value;
       this.controls.enabled = !dragging;
@@ -458,7 +467,8 @@ export class View {
     const doc = this.#session.document;
     const solid = doc.solids.get(id);
     if (!solid) return { ok: false, reason: "That object is no longer in the model." };
-    const owners = ancestorsThroughGroups(doc, id);    if (owners.length === 0) return { ok: true };
+    const owners = ancestorsThroughGroups(doc, id);
+    if (owners.length === 0) return { ok: true };
     const name = doc.solids.get(owners[0]!)?.meta.name ?? "a group";
     return { ok: false, reason: `${solid.meta.name} is inside "${name}". Double-click to enter it, or ungroup first.` };
   }
@@ -495,21 +505,54 @@ export class View {
       meshes.push(c.mesh);
     }
     const hits = ray.intersectObjects(meshes, false);
-    const first = hits[0];
-    if (first && first.face) {
-      const n = first.face.normal
-        .clone()
-        .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(first.object.matrixWorld))
-        .normalize();
+    // A face is single-sided in the eye but not in the picker, and Three only
+    // reads the material's side for a primitive's own triangles, not for how a
+    // hit was built. Boxes have no `face` field at all, so only a real triangle
+    // normal is compared. A hit that carries no triangle normal is still the
+    // face, so it is accepted rather than dropped.
+    const front = hits.find((h) => {
+      const solid = this.#session.document.solids.get(h.object.userData["solidId"] as SolidId);
+      if (solid?.recipe.kind !== "face") return true;
+      if (!h.face) return true;
+      return h.face.normal.dot(this.#faceNormal(solid.recipe)) > 1e-9;
+    });
+    if (front && front.face) {
+      const solid = this.#session.document.solids.get(front.object.userData["solidId"] as SolidId);
+      // A face has one normal for the whole surface, so it is reported exactly
+      // rather than read back off the hit; a solid's triangle normal is already
+      // correct and needs no override. A hit with no triangle normal falls back
+      // to the plane normal, never to undefined.
+      const n = solid?.recipe.kind === "face"
+        ? this.#faceNormal(solid.recipe)
+        : front.face
+          ? front.face.normal
+            .clone()
+            .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(front.object.matrixWorld))
+            .normalize()
+          : new THREE.Vector3(0, 0, 1);
       return {
         kind: "solid",
-        id: first.object.userData["solidId"] as SolidId,
+        id: front.object.userData["solidId"] as SolidId,
         faceNormal: [n.x, n.y, n.z],
-        point: [first.point.x, first.point.y, first.point.z],
+        point: [front.point.x, front.point.y, front.point.z],
       };
     }
     const g = this.groundPoint(clientX, clientY);
     return g ? { kind: "ground", point: g } : null;
+  }
+
+  /**
+   * A face recipe's plane normal in world space, so a moved face answers with
+   * the right side. The recipe's matrix is optional and a face with no matrix
+   * is the common case; `fromArray` on a short array would otherwise turn into
+   * NaN and every pick would miss.
+   */
+  #faceNormal(recipe: Extract<SolidRecipe, { kind: "face" }>): THREE.Vector3 {
+    const m = recipe.matrix;
+    if (!m || m.length < 16) return new THREE.Vector3(...recipe.plane.normal).normalize();
+    return new THREE.Vector3(...recipe.plane.normal)
+      .transformDirection(new THREE.Matrix4().fromArray([...m]))
+      .normalize();
   }
 
   /* ---------------------------------------------------------------- sync */
@@ -561,11 +604,16 @@ export class View {
       }
       this.#cache.set(id, this.#build(solid));
     }
+    // New meshes are measured, but a bounding sphere left over from an earlier
+    // mesh would stay stale: Three only computes one when it is null, so a
+    // rebuilt or transformed solid would keep the old pick radius.
+    for (const id of touchedSet) this.#cache.get(id)?.mesh.geometry.computeBoundingSphere();
     this.#dirty = true;
   }
 
   /** Red-outline the solids that break the fit envelope. */
   markFailures(ids: ReadonlySet<SolidId>, selected: ReadonlySet<SolidId>): void {
+    const highlight = new THREE.Color("#ffd27a");
     for (const [id, c] of this.#cache) {
       const line = c.edges.material as THREE.LineBasicMaterial;
       if (ids.has(id)) {
@@ -579,8 +627,18 @@ export class View {
         line.opacity = 0.55;
       }
       const mat = c.mesh.material as THREE.MeshStandardMaterial;
-      if (selected.has(id)) mat.color.copy(c.baseColor).lerp(new THREE.Color("#ffd27a"), 0.4);
+      // A face is one surface, and its fill is single-sided: from behind there
+      // is no fill to tint, so the selection would look lost. While selected
+      // the face draws its back side too, which is the same lerped highlight
+      // seen from either side and needs no second style.
+      if (c.flat) mat.side = selected.has(id) ? THREE.DoubleSide : THREE.FrontSide;
+      if (selected.has(id)) mat.color.copy(c.baseColor).lerp(highlight, 0.4);
       else mat.color.copy(c.baseColor);
+      // A face is a single surface: the fill tint above is the existing
+      // highlight, but the outline is the only thing that reads from either
+      // side. Tinting the outline too is what makes a zero-thickness face look
+      // selected rather than merely outlined when it is seen edge-on.
+      if (c.flat && selected.has(id)) line.color.copy(highlight);
     }
     this.#dirty = true;
   }
@@ -647,8 +705,12 @@ export class View {
       mat.visible = true;
       c.edges.visible = !hidden;
       c.mesh.visible = !hidden;
-      // A see-through solid casting a solid shadow reads as a bug.
-      c.mesh.castShadow = this.#shadows && opaque;
+      // Shaded draws the outline in both passes, so a face taken back to shaded
+      // after a line style must lose the depth test it was given there.
+      if (c.flat) (c.edges.material as THREE.LineBasicMaterial).depthTest = true;
+      // A see-through solid casting a solid shadow reads as a bug; neither does
+      // a face, which has no thickness for a shadow to come from.
+      c.mesh.castShadow = this.#shadows && opaque && !c.flat;
       c.mesh.receiveShadow = this.#shadows;
       c.mesh.userData["edgeOnly"] = false;
       (c.edges.material as THREE.LineBasicMaterial).color.set(0x2a2a2a);
@@ -662,6 +724,21 @@ export class View {
     // X-ray over a line drawing shows the faces faintly instead of not at all;
     // otherwise hidden line would ignore the lens entirely.
     mat.visible = this.#style === "hiddenLine" || this.#xray;
+    // Edges is an outline drawing: every solid shows through, and a face was
+    // the one thing that disappeared when seen from behind because its fill is
+    // single-sided. Its outline ignores depth there, which draws the far edge
+    // line over the near one, so it is also lifted just clear of the surface:
+    // the near edge then wins without z-fighting. Hidden line still draws the
+    // outline depth-tested, so a face it hides is hidden by the solid in front
+    // of it exactly like any other object.
+    if (c.flat) {
+      const line = c.edges.material as THREE.LineBasicMaterial;
+      line.depthTest = this.#style === "hiddenLine";
+      line.depthWrite = false;
+      line.polygonOffset = true;
+      line.polygonOffsetFactor = -1;
+      line.polygonOffsetUnits = -1;
+    }
     c.edges.visible = !hidden;
     c.mesh.visible = !hidden;
     c.mesh.castShadow = false;
@@ -674,16 +751,30 @@ export class View {
 
   #build(solid: Solid): CachedMesh {
     const geometry = toBufferGeometry(this.#session.meshOf(solid.id));
+    const flat = solid.recipe.kind === "face";
     const material = new THREE.MeshStandardMaterial({
       color: new THREE.Color(solid.meta.color),
       roughness: solid.meta.roughness,
       metalness: solid.meta.metallic,
       flatShading: true,
+      // A face is single-sided, as it is in SketchUp: the back of one drawn
+      // from the other side is not a surface the user can see or click. The
+      // shadow pass reads the same flag, so the sun does not light a plane that
+      // faces it from behind. Solids stay two-sided, because a closed mesh is
+      // never seen from inside under normal use and forcing FrontSide there
+      // would only expose a seam in a boolean result.
+      ...(flat ? { side: THREE.FrontSide, shadowSide: THREE.FrontSide } : {}),
     });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.castShadow = true;
+    // Only edges cast: a face flat on the ground would otherwise shadow the
+    // whole floor black at a grazing sun angle, which reads as a modelling error.
+    mesh.castShadow = !flat;
     mesh.receiveShadow = true;
     mesh.visible = !solid.meta.hidden;
+    // The picker measures and tests this mesh, and a transformed or edited mesh
+    // would otherwise keep the first sphere it was given. A face's sphere is its
+    // whole surface, so any ray that can reach it passes the cheap test.
+    geometry.computeBoundingSphere();
     mesh.userData["solidId"] = solid.id;
     mesh.name = solid.meta.name;
 
@@ -696,7 +787,13 @@ export class View {
     mesh.add(edges);
 
     this.content.add(mesh);
-    return { revision: solid.revision, mesh, edges, baseColor: new THREE.Color(solid.meta.color) };
+    return {
+      revision: solid.revision,
+      mesh,
+      edges,
+      baseColor: new THREE.Color(solid.meta.color),
+      flat,
+    };
   }
 
   #disposeCache(c: CachedMesh): void {
@@ -714,16 +811,22 @@ export class View {
     const id = this.gizmo.object?.userData["solidId"] as SolidId | undefined;
     if (dragging) {
       if (!id) return;
-      this.#gizmoStart = { id, matrix: [...this.#session.document.solids.get(id)!.recipe.matrix] };
+      const start = this.#session.document.solids.get(id)!.recipe.matrix;
+      this.#gizmoStart = { id, matrix: [...start] };
     } else if (this.#gizmoStart && this.gizmo.object) {
+      const start = this.#gizmoStart;
       this.#gizmoStart = null;
       const matrix = this.gizmo.object.matrix.clone();
-      this.#events.onGizmoCommit(id!, Array.from(matrix.elements));
+      const elements = Array.from(matrix.elements);
+      const next = this.gizmo.mode === "scale" ? withScaleFromDragged(start.matrix, elements) : elements;
+      // Hand the object back to the document now: the commit below rebuilds the
+      // mesh, and a mesh still parented to the gizmo would be transformed twice.
+      this.gizmo.detach();
+      this.#events.onGizmoCommit(id ?? start.id, next);
     }
     this.#dirty = true;
   }
-
-  /* ------------------------------------------------------------ scaffold */
+/* ------------------------------------------------------------ scaffold */
 
   #buildEnvironment(): { grid: THREE.GridHelper; axes: THREE.AxesHelper; sun: THREE.DirectionalLight; ground: THREE.Mesh } {
     const hemi = new THREE.HemisphereLight("#dfe8f2", "#2b2a28", 1.6);
@@ -966,7 +1069,9 @@ export class View {
     }
     const hit = this.pick(e.clientX, e.clientY);
     const point = hit && hit.kind === "ground" ? hit.point : hit && hit.kind === "solid" ? hit.point : null;
-    this.#events.onHover(point);
+    // Modifiers travel with the move: a rectangle must become square the moment
+    // Shift goes down, without waiting for the pointer to twitch.
+    this.#events.onHover(point, e.shiftKey);
   };
 
   /* --------------------------------------------------------------- loop */

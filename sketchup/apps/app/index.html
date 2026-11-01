@@ -170,27 +170,39 @@
         <section class="io">
           <button id="save">Save</button>
           <button id="open">Open</button>
+          <button id="import" title="Import an OBJ, DAE (COLLADA), DXF outline or STL">Import…</button>
           <button id="export">Export STL</button>
           <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
           <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
           <button id="zoom" title="Zoom extents (Z)">Zoom</button>
-          <button id="keys-open" title="Change keyboard shortcuts (Ctrl+K)">Shortcuts...</button>
+          <button id="keys-open" title="Change keyboard shortcuts (Ctrl+K)">Shortcuts…</button>
         </section>
 
-        <footer>
-          <kbd>R</kbd> rect <kbd>P</kbd> pull <kbd>L</kbd> line <kbd>M</kbd> tape <kbd>F</kbd> follow
-          <kbd>O</kbd> offset <kbd>Q</kbd> move <kbd>I</kbd> rotate <kbd>C</kbd> circle <kbd>Alt+G</kbd> polygon <kbd>A</kbd> arc
-          <kbd>D</kbd> dim <kbd>Shift</kbd> axis lock <kbd>G</kbd>/<kbd>T</kbd>/<kbd>S</kbd> gizmo
-          <kbd>Del</kbd> delete <kbd>Ctrl+Z</kbd> undo <kbd>Ctrl+K</kbd> commands
-        </footer>
+        <section class="units">
+          <h2>Units</h2>
+          <!--
+            Filled by `wireUnits()` from `UNIT_MENU`, next to the formatter that
+            understands each one: a second hard-coded list here is a list that can
+            disagree with the code.
+          -->
+          <select id="unit" title="How lengths are shown and read"></select>
+        </section>
+
+        <!--
+          Filled by main.ts from the same table the keyboard uses, so a rebound
+          key changes here too and a stale footer can never teach a wrong key.
+        -->
+        <footer id="keys-table"></footer>
       </aside>
       <main id="viewport"></main>
+      <div id="monitor" hidden></div>
       <div id="hint"></div>
       <div id="palette" hidden>
         <input id="palette-input" type="text" placeholder="Type a command" autocomplete="off" spellcheck="false" />
         <ul id="palette-list" role="listbox"></ul>
       </div>
-      <input id="file-input" type="file" accept=".fcproj,application/json" hidden />
+      <input id="file-input" type="file" accept=".fcproj,.json" hidden />
+    <input id="import-input" type="file" accept=".stl,.obj,.dae,.dxf" hidden />
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,12 +1,9 @@
-﻿import "./style.css";
+import "./style.css";
 import * as THREE from "three";
-import { formatLength, formatSize, parseLength, toStlAsciiNamed, type Vec3 } from "@apexus/geometry";
+import { parseLength, polygonArea, toStlAsciiNamed, type Vec3 } from "@apexus/geometry";
 import {
-  Annotation,
-  AnnotationStore,
   Session,
   addSolid,
-  ancestorsThroughGroups,
   arrayCopy,
   booleanSolids,
   bindShortcut,
@@ -18,10 +15,8 @@ import {
   componentsOf,
   definitionName,
   deleteSolids,
-  descendantsOf,
   deserializeJson,
   detachDefinition,
-  dimensionLength,
   drawnSolids,
   duplicateSolid,
   effectiveKeys,
@@ -59,10 +54,39 @@ import { View, type PickHit, type Tool } from "./view.js";
 import { ToolController } from "./tools.js";
 import { Snapper } from "./snap.js";
 import { CommandPalette } from "./palette.js";
+import { MaterialsPanel } from "./materials.js";
+import { AnnotationLayer } from "./annotations.view.js";
+import { formatLengthIn, formatSizeIn, isUnit, UNIT_MENU, type Unit } from "./display.js";
+import { statusLine } from "./measure.js";
+import { formatOf, readImport } from "./importers.js";
+import { applyImport } from "./applyImport.js";
+import { Autosave, clearDraft, describeDraft, draftWorthOffering, readDraft, writeDraft } from "./draft.js";
+import {
+  applyPick,
+  canEnter,
+  contextAfterExit,
+  resolveHit,
+  sanitiseContext,
+  pruneSelection,
+  soleSelection,
+} from "./selection.js";
 
 /**
  * Composition root: wires engine <-> kernel <-> view <-> tools <-> DOM.
- * The only thing this file knows about geometry is how to show it.
+ *
+ * This file owns three things and no others (ADR 0006):
+ *
+ *   1. **instances** — the session, the view, the panels, created once, in order;
+ *   2. **wiring** — the ports each actor is handed, and the one `refresh()` that
+ *      tells everyone the model changed;
+ *   3. **dispatch** — `runCommand(id)`, the single place an id becomes an effect,
+ *      shared by the toolbar, the keyboard and the palette.
+ *
+ * Anything with a rule of its own is a module: selection and group context in
+ * `selection.ts`, the material strip in `materials.ts`, dimensions in
+ * `annotations.view.ts`, picking in `view.ts`, gestures in `tools.ts`. The
+ * dependency direction is one way — this file imports them, never the reverse —
+ * so a module can be read and tested on its own.
  */
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -71,13 +95,31 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return el as T;
 };
 
+/** Where the display unit is remembered. Same browser-invisible class of state as the keymap. */
+const UNIT_KEY = "fitcheck.unit.v1";
+
 /* -------------------------------------------------------------- session */
 
 const session = new Session({ idPrefix: "o" });
 const viewport = $("viewport");
 const hint = $("hint");
 const snapper = new Snapper(session);
-let unit: "mm" | "cm" | "m" | "in" = "mm";
+/**
+ * The display unit. View state, never document state: it changes how a number
+ * reads and what a bare typed number means, not what the model is, so it is
+ * neither saved into `.fcproj` nor an undo step. It *is* remembered per browser,
+ * which is the one part of it that survives a reload.
+ */
+let unit: Unit = readStoredUnit();
+
+function readStoredUnit(): Unit {
+  try {
+    const stored = localStorage.getItem(UNIT_KEY);
+    return stored !== null && isUnit(stored) ? stored : "mm";
+  } catch {
+    return "mm";
+  }
+}
 let selection: ReadonlySet<SolidId> = new Set();
 let gizmoMode: "translate" | "rotate" | "scale" = "translate";
 let projection: "ortho" | "perspective" = "ortho";
@@ -104,7 +146,13 @@ const view = new View(viewport, session, {
     if (resolved.kind === "solid" && additive) setSelection([resolved.id], true);
     renderPanel();
   },
-  onHover: (point) => tools.hover(point, cursor.x, cursor.y),
+  onHover: (point, shift) => {
+    // Modifiers reach the tool before the move, so a Shift-held rectangle is
+    // already square on the very frame the key goes down.
+    tools.setModifiers({ shift });
+    tools.hover(point, cursor.x, cursor.y);
+    renderHint();
+  },
   onMarquee: (ids, additive) => {
     // Window/crossing drags *replace* the selection; Shift adds to it. A drag
     // selects a set at once, so it must never toggle like a Shift-click does.
@@ -112,14 +160,14 @@ const view = new View(viewport, session, {
     selection = next;
     view.attachGizmo(next.size === 1 ? [...next][0]! : null);
     renderPanel();
-    hint.textContent = ids.length === 0 ? "Drag selected nothing." : `Selected ${next.size} object(s).`;
+    setHint(ids.length === 0 ? "Drag selected nothing." : `Selected ${next.size} object(s).`);
   },
   onGizmoCommit: (id, matrix) => {
     try {
       session.execute(setMatrix([id], matrix));
-      hint.textContent = "Transformed.";
+      setHint("Transformed.");
     } catch (err) {
-      hint.textContent = (err as Error).message;
+      setHint((err as Error).message);
     }
     refresh();
   },
@@ -131,24 +179,24 @@ const tools = new ToolController({
   view,
   snapper,
   setHint: (text) => {
-    hint.textContent = text;
+    setHint(text);
   },
   select: (ids, additive) => setSelection(ids, additive ?? false),
   cursor: () => cursor,
   unit: () => unit,
   axisLocked: () => view.axisLocked,
   annotate: (note) => {
-    annotations.add(note);
-    renderAnnotations();
+    annotations.store.add(note);
+    annotations.render();
   },
   selection: () => [...selection],
   erase: (ids) => {
     session.execute(deleteSolids(ids));
     setSelection([...selection].filter((id) => !ids.includes(id)));
-    hint.textContent = `Erased ${ids.length} object(s).`;
+    setHint(`Erased ${ids.length} object(s).`);
     refresh();
   },
-  paintColor: () => paintColor,
+  paintColor: () => materials.paintColor,
   transformBlocked: (id) => {
     const verdict = view.canTransform(id);
     return verdict.ok ? null : verdict.reason;
@@ -157,223 +205,52 @@ const tools = new ToolController({
     // Paint is the one tool that colours without a selection, so it must not
     // disturb what is already selected.
     session.execute(setColor([id], color));
-    hint.textContent = `Painted ${color}.`;
+    setHint(`Painted ${color}.`);
     refresh();
   },
 });
 
-/** The bucket's current colour. A paint tool needs a held colour to be a tool. */
-let paintColor = "#d64541";
-
 /* ----------------------------------------------------------- materials */
 
-const MATERIALS_KEY = "fitcheck.materials";
-
-/** Colours the user saved. Seeded with a usable set so the strip is never empty. */
-let materials: string[] = (() => {
-  try {
-    const raw = localStorage.getItem(MATERIALS_KEY);
-    const saved: unknown = raw ? JSON.parse(raw) : null;
-    if (Array.isArray(saved)) {
-      const clean = saved.filter((c): c is string => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c));
-      if (clean.length > 0) return clean.slice(0, 24);
-    }
-  } catch {
-    // Corrupt or unavailable storage falls back to the defaults below.
-  }
-  return ["#d64541", "#f0a500", "#2e8b57", "#2f6f9f", "#d9d9d9", "#3b3b3b"];
-})();
-
-function saveMaterials(): void {
-  try {
-    localStorage.setItem(MATERIALS_KEY, JSON.stringify(materials));
-  } catch {
-    // Storage full or blocked: the strip still works this session.
-  }
-}
-
-function setPaintColor(color: string): void {
-  paintColor = color;
-  ($("paint-color") as HTMLInputElement).value = color;
-}
-
-/** Clicking a swatch both picks the colour *and* paints the selection, as a bucket should. */
-function useMaterial(color: string): void {
-  setPaintColor(color);
-  const ids = [...selection];
-  if (ids.length === 0) {
-    hint.textContent = `Bucket now holds ${color}. Click objects with the Paint tool.`;
-    return;
-  }
-  quietly(() => session.execute(setColor(ids, color)), `Painted ${ids.length} object(s) ${color}.`);
-}
-
-function renderMaterials(): void {
-  const strip = $("swatches");
-  strip.replaceChildren();
-  for (const color of materials) {
-    const b = document.createElement("button");
-    b.className = "swatch-chip";
-    b.style.background = color;
-    b.title = `${color}: paint the selection`;
-    b.dataset["color"] = color;
-    if (color === paintColor) b.classList.add("active");
-    b.addEventListener("click", () => useMaterial(color));
-    strip.append(b);
-  }
-}
+// The strip, its persistence and the bucket colour live in `materials.ts`.
+// The panel needs the selection and a quiet executor, both of which are wired
+// here because only the composition root may see every module.
+const materials = new MaterialsPanel(
+  {
+    session,
+    selection: () => [...selection],
+    say: (text) => {
+    setHint(text);
+  },
+    quietly,
+  },
+  $("swatches"),
+  $("paint-color") as HTMLInputElement,
+);
 
 $("paint-color").addEventListener("change", () =>
-  setPaintColor(($("paint-color") as HTMLInputElement).value),
+  materials.setPaintColor(($("paint-color") as HTMLInputElement).value),
 );
-$("paint-add").addEventListener("click", () => {
-  const color = ($("paint-color") as HTMLInputElement).value.toLowerCase();
-  if (!materials.includes(color)) materials = [color, ...materials].slice(0, 24);
-  saveMaterials();
-  renderMaterials();
-  hint.textContent = `Saved ${color} to materials.`;
-});
-$("paint-apply").addEventListener("click", () => useMaterial(paintColor));
-
+$("paint-add").addEventListener("click", () =>
+  materials.remember(($("paint-color") as HTMLInputElement).value),
+);
+$("paint-apply").addEventListener("click", () => materials.use(materials.paintColor));
 
 /* ----------------------------------------------------------- annotations */
 
-// Annotations live beside the document, not inside it: they are app state with
-// no undo entry and no effect on the fit check (see annotations.ts).
-const annotations = new AnnotationStore();
-const annotationGroup = new THREE.Group();
-view.scene.add(annotationGroup);
-
-/** Dimension lines float this far above their plane so they never z-fight. */
-const ANNOTATION_LIFT = 0.6;
-
-/** The 3D endpoints of a dimension: along its axis, offset outward for legibility. */
-function dimensionPoints(note: Annotation): [Vec3, Vec3] {
-  const a = note.a;
-  const b = note.b;
-  if (note.axis === "free" || note.axis === "z") {
-    return [
-      [a[0], a[1], a[2] + note.offset],
-      [b[0], b[1], b[2] + note.offset],
-    ];
-  }
-  if (note.axis === "x") {
-    const y = a[1] - note.offset;
-    return [
-      [a[0], y, a[2]],
-      [b[0], y, b[2]],
-    ];
-  }
-  const x = a[0] - note.offset;
-  return [
-    [x, a[1], a[2]],
-    [x, b[1], b[2]],
-  ];
-}
-
-function renderAnnotations(): void {
-  for (const child of [...annotationGroup.children]) {
-    annotationGroup.remove(child);
-    if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
-      child.geometry.dispose();
-      (child.material as THREE.Material).dispose();
-    }
-  }
-  for (const note of annotations.all()) {
-    if (note.kind !== "dimension") continue;
-    const [a, b] = dimensionPoints(note);
-    const mm = Math.abs(dimensionLength(note.a, note.b, note.axis));
-    const line = makeOverlayLine(0x2f6fed);
-    line.geometry = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(a[0], a[1], a[2] + ANNOTATION_LIFT),
-      new THREE.Vector3(b[0], b[1], b[2] + ANNOTATION_LIFT),
-    ]);
-    annotationGroup.add(line);
-    const mid: Vec3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2 + ANNOTATION_LIFT];
-    annotationGroup.add(makeLabel(`${mm.toFixed(1)} mm`, mid));
-  }
-  view.invalidate();
-}
-
-/** A solid-colour overlay line (annotations draw over the model, never depth-tested). */
-function makeOverlayLine(color: number): THREE.Line {
-  const material = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true });
-  const line = new THREE.Line(new THREE.BufferGeometry(), material);
-  line.renderOrder = 20;
-  return line;
-}
-
-/** A camera-facing text label on a small card, so it stays readable at any zoom. */
-function makeLabel(text: string, at: Vec3): THREE.Sprite {
-  const pad = 8;
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d")!;
-  ctx.font = "600 28px system-ui, sans-serif";
-  const width = Math.ceil(ctx.measureText(text).width) + pad * 2;
-  canvas.width = width;
-  canvas.height = 40;
-  ctx.font = "600 28px system-ui, sans-serif";
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#1c4fd8";
-  ctx.fillText(text, pad, 30);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
-  // Keep the card's aspect: 1 world unit of sprite = 1 mm of height.
-  sprite.scale.set(width * 2.2, 40 * 2.2, 1);
-  sprite.position.set(at[0], at[1], at[2]);
-  sprite.renderOrder = 21;
-  return sprite;
-}
+// Annotations live beside the document, not inside it: app state with no undo
+// entry and no effect on the fit check. The layer owns the drawing.
+const annotations = new AnnotationLayer(view.scene, () => view.invalidate());
 
 /* ------------------------------------------------------------ selection */
 
 /**
- * Selection is a set. A plain click replaces it; Shift-click toggles one object
- * so Move and Rotate can act on several (task L2-4c).
- */
-/**
- * Map a hit on a drawn mesh onto the object the current context points at.
- *
- * Meshes exist only for drawn solids, so a click always lands on a root or a
- * referenced child. Inside a group the user means the member under the cursor,
- * so walk the group's members and keep the innermost one whose bounds contain
- * the hit point. The point is the ray's impact on the group's surface, so a
- * member the user can see is a member that contains it; the innermost wins when
- * a child sits inside its parent's box, which is the one on top.
+ * A hit resolved through the group the user is standing in. The walk itself is
+ * pure and lives in `selection.ts`; this only supplies the live document.
  */
 function withContext(hit: Extract<PickHit, { kind: "solid" }>): PickHit {
-  if (contextId === null) return hit;
-  const doc = session.document;
-  let current = doc.solids.get(hit.id);
-  if (!current || current.recipe.kind !== "group") return hit;
-  let best: SolidId | null = null;
-  // Descend while the object under the point is still a group. Each level
-  // prefers the member that owns the context, so following the user into a
-  // nested group keeps landing on the objects they are working with.
-  for (;;) {
-    const recipe = current.recipe;
-    if (recipe.kind !== "group") break;
-    const under = recipe.members.filter((m) => boundsContain(session.boundsOf(m), hit.point));
-    if (under.length === 0) break;
-    const next = under.find((m) => m === contextId || descendantsOf(doc, m).includes(contextId!)) ?? under[0]!;
-    best = next;
-    const child = doc.solids.get(next);
-    if (!child) break;
-    current = child;
-  }
-  if (best === null) return hit;
-  return { ...hit, id: best };
-}
-
-/** Inclusive containment with a hair of slack for float noise at a face. */
-function boundsContain(b: { min: readonly number[]; max: readonly number[] }, p: readonly number[]): boolean {
-  const slack = 1e-6;
-  for (let i = 0; i < 3; i++) {
-    if (p[i]! < b.min[i]! - slack || p[i]! > b.max[i]! + slack) return false;
-  }
-  return true;
+  const id = resolveHit(session.document, contextId, hit.id, hit.point, (solidId) => session.boundsOf(solidId));
+  return id === hit.id ? hit : { ...hit, id };
 }
 
 /**
@@ -382,11 +259,11 @@ function boundsContain(b: { min: readonly number[]; max: readonly number[] }, p:
  * it: the user's mistake should not throw them out of where they were working.
  */
 function enterGroup(id: SolidId): void {
-  const solid = session.document.solids.get(id);
-  if (!solid || solid.recipe.kind !== "group" || solid.recipe.members.length === 0) return;
+  if (!canEnter(session.document, id)) return;
+  const solid = session.document.solids.get(id)!;
   contextId = id;
   collapsed.delete(id);
-  hint.textContent = `Inside "${solid.meta.name}". Escape to step out.`;
+  setHint(`Inside "${solid.meta.name}". Escape to step out.`);
   refresh();
 }
 
@@ -397,26 +274,44 @@ function enterGroup(id: SolidId): void {
  */
 function leaveGroup(): void {
   if (contextId === null) return;
-  const owner = ancestorsThroughGroups(session.document, contextId)[0] ?? null;
+  const owner = contextAfterExit(session.document, contextId);
   contextId = owner;
   const name = owner ? session.document.solids.get(owner)?.meta.name : null;
-  hint.textContent = owner ? `Inside "${name}".` : "Back at the model.";
+  setHint(owner ? `Inside "${name}".` : "Back at the model.");
   refresh();
 }
 
+/**
+ * Replace or toggle the selection.
+ *
+ * A single id goes through `applyPick`, which is exactly the rule a viewport
+ * click obeys, so a click and a click on an outliner row can never disagree
+ * about what Shift means. A list of ids replaces outright: toggling twelve
+ * objects because the user Shift-clicked a group row is never what they meant.
+ */
 function setSelection(ids: readonly SolidId[], additive = false): void {
-  if (additive) {
-    const next = new Set(selection);
-    for (const id of ids) {
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-    }
-    selection = next;
-  } else {
-    selection = new Set(ids);
-  }
-  view.attachGizmo(selection.size === 1 ? [...selection][0]! : null);
+  selection = ids.length === 1 ? applyPick(selection, ids[0]!, additive) : new Set(ids);
+  view.attachGizmo(soleSelection(selection));
   renderPanel();
+}
+
+/**
+ * What an outliner row says about an object: its name, and its size in its own
+ * terms.
+ *
+ * A face has area and no volume, so it is named "Face" and measured in square
+ * units; anything else is a solid and measured in cubic ones. Deciding here
+ * rather than at the row keeps the rule in one place, and keeps the zero that
+ * a face's volume would report from ever reaching the user as a real answer.
+ */
+function describeExtent(solid: Solid, from: Session): { readonly name: string; readonly extent: string } {
+  if (solid.recipe.kind === "face") {
+    // The ring is planar and unprojected, so its 2D area is its true area even
+    // after a move or a rotation: the recipe matrix leaves the recipe alone.
+    const area = Math.abs(polygonArea(solid.recipe.points)) / 100;
+    return { name: "Face", extent: `${area.toFixed(1)} cm2` };
+  }
+  return { name: solid.meta.name, extent: `${(from.analyse(solid.id).volume / 1000).toFixed(1)} cm3` };
 }
 
 /**
@@ -477,7 +372,11 @@ function outlinerRow(solid: Solid, depth = 0): HTMLLIElement {
 
   const label = document.createElement("span");
   label.className = "name";
-  label.textContent = `${solid.meta.name} - ${(session.analyse(solid.id).volume / 1000).toFixed(1)} cm3`;
+  // A face is named for what it is and measured by its area; every other object
+  // is a solid and measured by its volume. Reporting "0.0 cm3" for a face would
+  // read as a broken object rather than a flat one.
+  const shape = describeExtent(solid, session);
+  label.textContent = `${shape.name} - ${shape.extent}`;
   label.title = definition
     ? `Component "${definition}". Double-click to rename every instance.`
     : "Double-click to rename";
@@ -543,9 +442,9 @@ function groupByTag(solids: Iterable<Solid>): Map<string | null, Solid[]> {
 function quietly(action: () => void, done?: string): void {
   try {
     action();
-    if (done) hint.textContent = done;
+    if (done) setHint(done);
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
   refresh();
 }
@@ -615,10 +514,10 @@ function beginRenameDefinition(row: HTMLLIElement, definition: string): void {
     if (commit && next && next !== definition) {
       try {
         const patch = session.execute(renameDefinition(definition, next));
-        hint.textContent = `Renamed component "${definition}" to "${next}" (${patch.forward.size} instance(s)).`;
+        setHint(`Renamed component "${definition}" to "${next}" (${patch.forward.size} instance(s)).`);
         refresh();
       } catch (err) {
-        hint.textContent = (err as Error).message;
+        setHint((err as Error).message);
         refresh();
       }
     } else {
@@ -777,7 +676,14 @@ function download(name: string, data: string, type: string): void {
 }
 
 function saveProject(): void {
-  download("untitled.fcproj", serializeJson(session.document), "application/json");
+  const json = serializeJson(session.document);
+  download("untitled.fcproj", json, "application/json");
+  // A real save makes any pending draft redundant: clear the slot so a crash
+  // two seconds later cannot offer older work than the file on disk.
+  savedJson = json;
+  autosave.markSaved(json);
+  clearDraft(localStorage);
+  refreshDraftBadge(null);
 }
 
 function exportStl(): void {
@@ -791,7 +697,7 @@ function exportStl(): void {
     parts.push({ name: solid.meta.name.replace(/[^A-Za-z0-9_-]/g, "_"), mesh: session.meshOf(id) });
   }
   if (parts.length === 0) {
-    hint.textContent = "Nothing to export yet.";
+    setHint("Nothing to export yet.");
     return;
   }
   download("model.stl", toStlAsciiNamed(parts), "model/stl");
@@ -806,29 +712,172 @@ function openProject(file: File): void {
       setSelection([]);
       view.sync();
       view.zoomExtents();
+      savedJson = serializeJson(session.document);
+      autosave.markSaved(savedJson);
+      currentFile = file.name;
       refresh();
-      hint.textContent = `Loaded ${doc.solids.size} object${doc.solids.size === 1 ? "" : "s"}.`;
+      setHint(`Loaded ${doc.solids.size} object${doc.solids.size === 1 ? "" : "s"} from ${file.name}.`);
     } catch (err) {
-      hint.textContent = `Could not open file: ${(err as Error).message}`;
+      setHint(`Could not open file: ${(err as Error).message}`);
     }
   };
   reader.readAsText(file);
 }
 
+/**
+ * Import an interchange file. A mesh becomes one object, placed at the origin
+ * (not nudged aside), because the file already says where it belongs; a DXF
+ * outline becomes one flat face per closed loop, which is the only shape a
+ * polyline can become without a guess.
+ */
+function importFile(file: File): void {
+  if (formatOf(file.name) === "project") {
+    openProject(file);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = readImport(file.name, String(reader.result));
+    if (result.kind === "error") {
+      setHint(result.reason);
+      return;
+    }
+    try {
+      const applied = applyImport(session, result);
+      setSelection(applied.ids);
+      setHint(applied.message);
+      view.sync();
+      view.zoomExtents();
+    } catch (err) {
+      setHint(`Could not import "${file.name}": ${(err as Error).message}`);
+    }
+    refresh();
+  };
+  reader.readAsText(file);
+}
+
+/* ------------------------------------------------------------ autosave */
+
+/**
+ * A draft every 30 s, so a crash costs at most half a minute. `savedJson` is the
+ * last state the user actually saved; the autosave compares against it and
+ * writes only when the document has moved on, so an idle tab writes nothing.
+ */
+let savedJson: string | null = null;
+/** The file the user last opened or saved as, so a recovery prompt can name it. */
+let currentFile: string | null = null;
+
+const autosave = new Autosave(
+  30_000,
+  () => ({ json: serializeJson(session.document), fileName: currentFile }),
+  (draft) => {
+    if (writeDraft(localStorage, draft)) refreshDraftBadge(draft.at);
+  },
+);
+
+/**
+ * The recovery prompt. A draft is only offered when it is newer than the last
+ * save and not ancient, so a clean session never nags.
+ */
+function offerRecovery(): void {
+  const draft = readDraft(localStorage);
+  if (!draft || !draftWorthOffering(draft, savedJson, Date.now())) return;
+  const label = describeDraft(draft);
+  if (!window.confirm(`${label}.\n\nOpen the recovered draft? Cancel discards it.`)) {
+    clearDraft(localStorage);
+    return;
+  }
+  try {
+    session.load(deserializeJson(draft.json));
+    currentFile = draft.fileName;
+    setSelection([]);
+    view.sync();
+    view.zoomExtents();
+    refresh();
+    setHint(`${label}: recovered. Save it under a name when you are happy.`);
+  } catch (err) {
+    clearDraft(localStorage);
+    setHint(`The recovered draft could not be opened (${(err as Error).message}); it has been discarded.`);
+  }
+}
+
+/** A quiet line in the panel saying a draft exists, with its time. */
+function refreshDraftBadge(at: number | null): void {
+  const badge = document.getElementById("draft-badge");
+  if (!badge) return;
+  const when = at === null ? "" : new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  badge.textContent = at === null ? "" : `Draft saved ${when}`;
+  badge.hidden = at === null;
+}
+
+/* ---------------------------------------------------------------- units */
+
+/**
+ * One place turns the display unit into everything that shows a number: the
+ * select, the envelope inputs (re-labelled, not re-scaled, so `600` typed in mm
+ * is not silently read as `600 cm`), and the status line.
+ */
+function applyUnit(next: Unit): void {
+  unit = next;
+  try {
+    localStorage.setItem(UNIT_KEY, next);
+  } catch {
+    /* a browser with storage off still gets the unit for this session */
+  }
+  ($("unit") as HTMLSelectElement).value = next;
+  const label = UNIT_MENU.find((u) => u.id === next)?.label ?? next;
+  for (const id of ["env-w", "env-h", "env-d"]) {
+    const input = $(id) as HTMLInputElement;
+    input.title = `Length in ${label}`;
+  }
+  renderHint();
+  setHint(`Lengths now read in ${label}.`);
+}
+
+/** The unit select and the autosave badge, built from the one unit table. */
+function wireUnits(): void {
+  const select = $("unit") as HTMLSelectElement;
+  select.replaceChildren(...UNIT_MENU.map((u) => new Option(u.label, u.id)));
+  select.value = unit;
+  select.addEventListener("change", () => applyUnit(select.value as Unit));
+  const badge = document.createElement("div");
+  badge.id = "draft-badge";
+  badge.hidden = true;
+  badge.className = "draft-badge";
+  $("keys-table").before(badge);
+}
+
 /* --------------------------------------------------------------- wiring */
 
+/**
+ * The status line. A tool's own sentence is transient (it is replaced by the
+ * next hint); the *measurement* is the part that must persist, so it is drawn
+ * in its own element that only the tool can clear. That split is why a reading
+ * does not flicker back to the previous message between two mouse moves.
+ */
+const monitor = $("monitor");
+
+function setHint(text: string): void {
+  hint.textContent = text;
+}
+
+function renderHint(): void {
+  const measure = tools.measure();
+  monitor.textContent = measure && measure.text !== "" ? statusLine(measure) : "";
+  monitor.hidden = monitor.textContent === "";
+}
+
 function refresh(): void {
-  // A context can be undone away (delete, ungroup, then Ctrl+Z). Rather than
-  // trusting every command to remember, check here: a context that no longer
-  // names a live group is dropped, so a click can never be routed into nothing.
-  if (contextId !== null) {
-    const ctx = session.document.solids.get(contextId);
-    if (!ctx || ctx.recipe.kind !== "group") contextId = null;
-  }
+  // A context can be undone away (delete, ungroup, then Ctrl+Z), and so can a
+  // selected object. Rather than trusting every command to remember, check here:
+  // a context that no longer names a live group is dropped, so a click can never
+  // be routed into nothing, and a stale selection cannot drive the gizmo.
+  contextId = sanitiseContext(session.document, contextId);
+  selection = pruneSelection(session.document, selection);
   view.sync();
   renderPanel();
   renderTags();
-  renderMaterials();
+  materials.render();
 }
 
 /** Rebuild the tag list: one row per tag, with show/hide and a count. */
@@ -914,38 +963,38 @@ function runCommand(id: CommandId): void {
         if (ids.length === 0) return;
         session.execute(deleteSolids(ids));
         setSelection([]);
-        hint.textContent = `Deleted ${ids.length} object(s).`;
+        setHint(`Deleted ${ids.length} object(s).`);
         refresh();
         return;
       }
       case "duplicate": {
         const first = [...selection][0];
         if (!first) {
-          hint.textContent = "Duplicate: select something first.";
+          setHint("Duplicate: select something first.");
           return;
         }
         const patch = session.execute(duplicateSolid(first, [50, 50, 0]));
         setSelection([...patch.forward.keys()]);
-        hint.textContent = "Duplicated (50/50/0 mm).";
+        setHint(`Duplicated (${formatSizeIn(unit, [50, 50, 0])}).`);
         refresh();
         return;
       }
       case "instance": {
         const first = [...selection][0];
         if (!first) {
-          hint.textContent = "Make Instance: select something first.";
+          setHint("Make Instance: select something first.");
           return;
         }
         const patch = session.execute(instanceCopy(first, [200, 0, 0]));
         setSelection([...patch.forward.keys()]);
-        hint.textContent = "Instance made (200 mm to the right); edit the source and this follows.";
+        setHint(`Instance made (${formatLengthIn(unit, 200)} to the right); edit the source and this follows.`);
         refresh();
         return;
       }
       case "makeComponent": {
         const first = [...selection][0];
         if (!first) {
-          hint.textContent = "Make Component: select something first.";
+          setHint("Make Component: select something first.");
           return;
         }
         const solid = session.document.solids.get(first);
@@ -956,7 +1005,7 @@ function runCommand(id: CommandId): void {
         // does with a fresh component is place more of them, or move this one.
         const placed = [...patch.backward].filter(([, prev]) => prev === null).map(([id]) => id);
         setSelection(placed);
-        hint.textContent = `Component "${definitionName(session.document.solids.get(first)!)}" made; double-click a row to rename every instance.`;
+        setHint(`Component "${definitionName(session.document.solids.get(first)!)}" made; double-click a row to rename every instance.`);
         refresh();
         return;
       }
@@ -967,11 +1016,11 @@ function runCommand(id: CommandId): void {
           if (solid?.recipe.kind === "instance" && solid.recipe.definition) defs.add(solid.recipe.definition);
         }
         if (defs.size === 0) {
-          hint.textContent = "Detach Component: select a component instance first.";
+          setHint("Detach Component: select a component instance first.");
           return;
         }
         session.batch([...defs].map((d) => detachDefinition(d)));
-        hint.textContent = `Detached ${defs.size} component(s); the objects stay, only the link goes.`;
+        setHint(`Detached ${defs.size} component(s); the objects stay, only the link goes.`);
         refresh();
         return;
       }
@@ -981,7 +1030,7 @@ function runCommand(id: CommandId): void {
       case "group": {
         const ids = [...selection];
         if (ids.length === 0) {
-          hint.textContent = "Make Group: select something first.";
+          setHint("Make Group: select something first.");
           return;
         }
         const patch = session.execute(groupSolids(ids));
@@ -992,28 +1041,28 @@ function runCommand(id: CommandId): void {
         // leaving the children selected would move them out of the group's idea
         // of "together" on the very next drag.
         setSelection(created ? [created] : []);
-        hint.textContent = `Grouped ${ids.length} object(s).`;
+        setHint(`Grouped ${ids.length} object(s).`);
         refresh();
         return;
       }
       case "ungroup": {
         const groups = [...selection].filter((id) => session.document.solids.get(id)?.recipe.kind === "group");
         if (groups.length === 0) {
-          hint.textContent = "Ungroup: select a group first.";
+          setHint("Ungroup: select a group first.");
           return;
         }
         session.batch(groups.map((id) => ungroupSolid(id)));
         // The wrapper ids are gone; selecting them would leave a phantom
         // selection that the next Delete would silently ignore.
         setSelection([]);
-        hint.textContent = `Ungrouped ${groups.length} group(s).`;
+        setHint(`Ungrouped ${groups.length} group(s).`);
         refresh();
         return;
       }
       case "explode": {
         const groups = [...selection].filter((id) => session.document.solids.get(id)?.recipe.kind === "group");
         if (groups.length === 0) {
-          hint.textContent = "Explode: select a group first.";
+          setHint("Explode: select a group first.");
           return;
         }
         // Explode is ungroup applied to the group's groups, one level deep: the
@@ -1026,11 +1075,11 @@ function runCommand(id: CommandId): void {
             : [];
         });
         if (inner.length === 0) {
-          hint.textContent = "Explode: no nested groups inside the selection.";
+          setHint("Explode: no nested groups inside the selection.");
           return;
         }
         session.batch(inner.map((id) => ungroupSolid(id)));
-        hint.textContent = `Exploded ${inner.length} nested group(s).`;
+        setHint(`Exploded ${inner.length} nested group(s).`);
         refresh();
         return;
       }
@@ -1039,7 +1088,7 @@ function runCommand(id: CommandId): void {
       case "intersect": {
         const [a, b] = [...selection];
         if (!a || !b) {
-          hint.textContent = "Booleans need exactly two objects selected.";
+          setHint("Booleans need exactly two objects selected.");
           return;
         }
         const op = id === "union" ? "union" : id === "subtract" ? "difference" : "intersection";
@@ -1047,12 +1096,12 @@ function runCommand(id: CommandId): void {
         const created = [...patch.forward.keys()].find((k) => !selection.has(k));
         setSelection(created ? [created] : []);
         refresh();
-        hint.textContent = `${op} done.`;
+        setHint(`${op} done.`);
         return;
       }
       case "fit":
         session.execute(fitToEnvelope());
-        hint.textContent = "Scaled down to fit the envelope.";
+        setHint("Scaled down to fit the envelope.");
         refresh();
         return;
       case "viewIso":
@@ -1063,12 +1112,12 @@ function runCommand(id: CommandId): void {
       case "viewLeft":
       case "viewBottom":
         view.standardView(id.slice(4).toLowerCase() as "iso" | "top" | "front" | "right" | "back" | "left" | "bottom");
-        hint.textContent = `${commandLabels[id]} view.`;
+        setHint(`${commandLabels[id]} view.`);
         renderPanel();
         return;
       case "zoomExtents":
         view.zoomExtents();
-        hint.textContent = "Framed the model.";
+        setHint("Framed the model.");
         return;
       case "projectionOrtho":
       case "projectionPersp":
@@ -1084,7 +1133,7 @@ function runCommand(id: CommandId): void {
         return;
       case "toggleXray":
         view.setXray(!view.xray);
-        hint.textContent = view.xray ? "X-ray on: faces are see-through." : "X-ray off.";
+        setHint(view.xray ? "X-ray on: faces are see-through." : "X-ray off.");
         renderPanel();
         return;
       case "toggleAxes":
@@ -1092,7 +1141,7 @@ function runCommand(id: CommandId): void {
         return;
     }
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
 }
 
@@ -1129,6 +1178,9 @@ function commandEnabled(id: CommandId): boolean {
 
 function selectTool(tool: Tool): void {
   tools.setTool(tool);
+  // The rail belongs to the tool that produced it: switching tools retires the
+  // last reading instead of leaving a stale number under the new cursor.
+  renderHint();
   renderPanel();
 }
 
@@ -1151,7 +1203,7 @@ const palette = new CommandPalette({
     }
     overrides = result.overrides;
     saveKeymap();
-    hint.textContent = `${commandLabels[id]} is now ${spec}.`;
+    setHint(`${commandLabels[id]} is now ${spec}.`);
     return { ok: true };
   },
 });
@@ -1170,27 +1222,26 @@ function setGizmo(mode: "translate" | "rotate" | "scale"): void {
 function setProjection(kind: "ortho" | "perspective"): void {
   view.setProjection(kind);
   projection = kind;
-  hint.textContent = kind === "ortho" ? "Orthographic projection." : "Perspective projection.";
+  setHint(kind === "ortho" ? "Orthographic projection." : "Perspective projection.");
   renderPanel();
 }
 
 /** Drawing style: shaded, hidden line or edges only. */
 function setStyle(style: "shaded" | "hiddenLine" | "edges"): void {
   view.setStyle(style);
-  hint.textContent =
-    style === "shaded" ? "Shaded style." : style === "hiddenLine" ? "Hidden line style." : "Edges only.";
+  setHint(style === "shaded" ? "Shaded style." : style === "hiddenLine" ? "Hidden line style." : "Edges only.");
   renderPanel();
 }
 
 function setShadows(on: boolean): void {
   view.setShadows(on);
-  hint.textContent = on ? "Shadows on." : "Shadows off.";
+  setHint(on ? "Shadows on." : "Shadows off.");
   renderPanel();
 }
 
 function setAxes(on: boolean): void {
   view.setAxesVisible(on);
-  hint.textContent = on ? "Axes shown." : "Axes hidden.";
+  setHint(on ? "Axes shown." : "Axes hidden.");
   renderPanel();
 }
 
@@ -1206,14 +1257,14 @@ function readEnvelope(): Vec3 | null {
 function setEnvelopeFromInputs(): void {
   const size = readEnvelope();
   if (!size) {
-    hint.textContent = "Envelope needs a positive width, height and depth (e.g. 600, 60cm, 2m).";
+    setHint("Envelope needs a positive width, height and depth (e.g. 600, 60cm, 2m).");
     return;
   }
   try {
     session.execute(setEnvelope({ min: [0, 0, 0], max: size }));
-    hint.textContent = `Envelope ${formatSize(size, unit)}.`;
+    setHint(`Envelope ${formatSizeIn(unit, size)}.`);
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
   refresh();
 }
@@ -1250,18 +1301,18 @@ $("env-clear").addEventListener("click", () => {
 $("env-fit").addEventListener("click", () => {
   try {
     session.execute(fitToEnvelope());
-    hint.textContent = "Scaled down to fit the envelope.";
+    setHint("Scaled down to fit the envelope.");
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
   refresh();
 });
 $("env-centre").addEventListener("click", () => {
   try {
     session.execute(centreInEnvelope());
-    hint.textContent = "Centred in the envelope.";
+    setHint("Centred in the envelope.");
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
   refresh();
 });
@@ -1269,7 +1320,7 @@ $("env-centre").addEventListener("click", () => {
 $("opacity").addEventListener("change", () => {
   const ids = [...selection];
   if (ids.length === 0) {
-    hint.textContent = "Opacity: select something first.";
+    setHint("Opacity: select something first.");
     return;
   }
   const percent = Number(($("opacity") as HTMLInputElement).value);
@@ -1280,7 +1331,7 @@ $("opacity").addEventListener("change", () => {
 function applyFinish(): void {
   const ids = [...selection];
   if (ids.length === 0) {
-    hint.textContent = "Finish: select something first.";
+    setHint("Finish: select something first.");
     return;
   }
   const rough = Number(($("roughness") as HTMLInputElement).value) / 100;
@@ -1300,7 +1351,7 @@ $("keys-open").addEventListener("click", () => palette.open());
 $("tag-apply").addEventListener("click", () => {
   const ids = [...selection];
   if (ids.length === 0) {
-    hint.textContent = "Tag: select something first.";
+    setHint("Tag: select something first.");
     return;
   }
   const name = ($("tag-name") as HTMLInputElement).value.trim();
@@ -1311,12 +1362,12 @@ $("section-apply").addEventListener("click", () => {
   const axis = ($("section-axis") as HTMLSelectElement).value as "x" | "y" | "z";
   const at = parseLength(($("section-at") as HTMLInputElement).value, unit);
   if (!at) {
-    hint.textContent = "Section: the cut position must be a length (e.g. 0, 30cm, 2in).";
+    setHint("Section: the cut position must be a length (e.g. 0, 30cm, 2in).");
     return;
   }
   quietly(
     () => session.execute(setSection({ axis, offset: at.mm, flip: false })),
-    `Cut at ${axis.toUpperCase()} = ${formatLength(at.mm, unit)}.`,
+    `Cut at ${axis.toUpperCase()} = ${formatLengthIn(unit, at.mm)}.`,
   );
 });
 
@@ -1333,24 +1384,24 @@ for (const [button, command] of [
 function runArray(): void {
   const id = [...selection][0];
   if (!id) {
-    hint.textContent = "Array: select one object first.";
+    setHint("Array: select one object first.");
     return;
   }
   const count = Math.trunc(Number(($("array-count") as HTMLInputElement).value));
   const step = parseLength(($("array-step") as HTMLInputElement).value, unit);
   const axis = ($("array-axis") as HTMLSelectElement).value;
   if (!Number.isInteger(count) || count < 1 || count > 500) {
-    hint.textContent = "Array: count must be a whole number from 1 to 500.";
+    setHint("Array: count must be a whole number from 1 to 500.");
     return;
   }
   if (!step || step.mm <= 0) {
-    hint.textContent = "Array: step must be a positive length (e.g. 100, 60cm, 2in).";
+    setHint("Array: step must be a positive length (e.g. 100, 60cm, 2in).");
     return;
   }
   const offset: Vec3 = [axis === "x" ? step.mm : 0, axis === "y" ? step.mm : 0, axis === "z" ? step.mm : 0];
   // One command, one undo step: an array is a single user intention.
   session.execute(arrayCopy(id, count, offset));
-  hint.textContent = `Array: ${count} copies ${formatLength(step.mm, unit)} apart along ${axis.toUpperCase()}.`;
+  setHint(`Array: ${count} copies ${formatLengthIn(unit, step.mm)} apart along ${axis.toUpperCase()}.`);
   refresh();
 }
 
@@ -1358,7 +1409,7 @@ $("sel-array").addEventListener("click", () => {
   try {
     runArray();
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
     refresh();
   }
 });
@@ -1370,9 +1421,9 @@ $("sel-duplicate").addEventListener("click", () => {
     const patch = session.execute(duplicateSolid(id, [50, 50, 0]));
     const created = [...patch.forward.keys()];
     setSelection(created);
-    hint.textContent = "Duplicated (50/50/0 mm).";
+    setHint(`Duplicated (${formatSizeIn(unit, [50, 50, 0])}).`);
   } catch (err) {
-    hint.textContent = (err as Error).message;
+    setHint((err as Error).message);
   }
   refresh();
 });
@@ -1380,10 +1431,34 @@ $("sel-duplicate").addEventListener("click", () => {
 $("save").addEventListener("click", saveProject);
 $("export").addEventListener("click", exportStl);
 $("open").addEventListener("click", () => $("file-input").click());
-$("file-input").addEventListener("change", (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (file) openProject(file);
-  (e.target as HTMLInputElement).value = "";
+$("import").addEventListener("click", () => $("import-input").click());
+for (const id of ["file-input", "import-input"]) {
+  $(id).addEventListener("change", (e) => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (file) (id === "import-input" ? importFile : openProject)(file);
+    // Clearing the value lets the same file be chosen twice in a row, which a
+    // user does the moment the first attempt warns them the unit was assumed.
+    input.value = "";
+  });
+}
+
+/**
+ * Drag and drop, for the gesture people actually use: a file dragged from a
+ * folder must not open in a new tab (the browser default) and must not be
+ * treated as a project when it is an OBJ.
+ */
+const viewRoot = $("viewport").parentElement ?? document.body;
+for (const type of ["dragenter", "dragover"]) {
+  viewRoot.addEventListener(type, (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  });
+}
+viewRoot.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer?.files?.[0];
+  if (file) importFile(file);
 });
 
 $("undo").addEventListener("click", () => runCommand("undo"));
@@ -1396,6 +1471,15 @@ window.addEventListener("keydown", (e) => {
 
   // The palette owns the keyboard while it is open.
   if (palette.isOpen) return;
+
+  // Shift with no mouse movement must still square the rectangle being sized,
+  // so the modifier is passed on the key press, not only on the next move. It
+  // also must not reach the typed-length path, where Shift+1 would be "!".
+  if (e.key === "Shift") {
+    tools.setModifiers({ shift: true });
+    renderHint();
+    return;
+  }
 
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === "k") {
@@ -1458,24 +1542,59 @@ function shortcutFor(e: KeyboardEvent): CommandId | null {
 view.renderer.domElement.addEventListener("pointermove", (e) => {
   cursor.x = e.clientX;
   cursor.y = e.clientY;
-  if (e.buttons === 1 && tools.hasPending) tools.drag(e.clientX, e.clientY);
+  // A drag must update the reading too, or the number freezes while the edge is
+  // being pulled, which is exactly when it matters.
+  if (e.buttons === 1 && tools.hasPending) {
+    tools.drag(e.clientX, e.clientY);
+    renderHint();
+  }
 });
 view.renderer.domElement.addEventListener("pointerup", () => {
   if (tools.hasPending) renderPanel();
 });
 
+// Releasing Shift un-squares the pending rectangle, so the next move is free
+// again; the reading is redrawn in the same frame the constraint lifts.
+window.addEventListener("keyup", (e) => {
+  if (e.key !== "Shift") return;
+  tools.setModifiers({ shift: false });
+  renderHint();
+});
+
 /* ---------------------------------------------------------------- startup */
+
+/**
+ * The keys table in the panel footer, generated from the live keymap: a printed
+ * table would be the first thing to lie the day a binding changes. Only bound
+ * commands appear, so the table is short and every row is true.
+ */
+function renderKeysTable(): void {
+  const table = $("keys-table");
+  const rows: string[] = [];
+  for (const [key, id] of Object.entries(keys)) {
+    if (id === undefined) continue;
+    rows.push(`${key} ${commandLabels[id].toLowerCase()}`);
+  }
+  rows.sort((a, b) => a.localeCompare(b));
+  const line = document.createElement("p");
+  line.className = "keys-line";
+  line.textContent = rows.join("  ·  ");
+  table.replaceChildren(line);
+}
 
 async function start(): Promise<void> {
   view.setTool("select");
   view.setGizmoMode(gizmoMode);
+  wireUnits();
+  renderKeysTable();
+  autosave.start();
   try {
     await initKernel();
     refresh();
-    hint.textContent = "Ready. Solid kernel online: booleans available.";
+    setHint("Ready. Solid kernel online: booleans available.");
   } catch {
     refresh();
-    hint.textContent = "Ready (solid kernel unavailable; booleans disabled).";
+    setHint("Ready (solid kernel unavailable; booleans disabled).");
   }
   const demo = new URLSearchParams(location.search).get("demo") === "1";
   if (demo) {
@@ -1509,7 +1628,8 @@ async function start(): Promise<void> {
   }
   refresh();
   view.zoomExtents();
-  if (!demo) hint.textContent = "Click the ground to draw a rectangle (R).";
+  if (!demo) offerRecovery();
+  if (!demo) setHint("Click the ground to draw a rectangle (R).");
 }
 
 void start();
@@ -1608,7 +1728,7 @@ window.fitcheck = {
   paintFirst(color) {
     const first = [...session.document.solids.values()][0];
     if (!first) return false;
-    setPaintColor(color);
+    materials.setPaintColor(color);
     session.execute(setColor([first.id], color));
     refresh();
     return true;
@@ -1717,3 +1837,4 @@ window.fitcheck = {
   },
 };
 
+;
