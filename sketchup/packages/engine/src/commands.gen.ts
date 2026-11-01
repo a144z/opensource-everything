@@ -19,6 +19,9 @@ export const commandLabels = {
   'eraser': 'Eraser',
   'tape': 'Tape',
   'dimension': 'Dimension',
+  'group': 'Make Group',
+  'ungroup': 'Ungroup',
+  'explode': 'Explode',
   'delete': 'Delete',
   'duplicate': 'Duplicate',
   'instance': 'Make Instance',
@@ -66,6 +69,9 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
   'eraser': 'e',
   'tape': 'm',
   'dimension': 'd',
+  'group': 'Ctrl+g',
+  'ungroup': 'Ctrl+Shift+g',
+  'explode': 'Shift+g',
   'delete': 'Delete',
   'viewIso': 'Ctrl+0',
   'viewTop': 'Ctrl+1',
@@ -82,7 +88,7 @@ export const commandKeys: Partial<Record<CommandId, string>> = {
 };
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
-export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'rotatedRectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'scale', 'paint', 'eraser', 'tape', 'dimension', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
+export const commandAll: readonly CommandId[] = ['select', 'rectangle', 'rotatedRectangle', 'circle', 'arc', 'line', 'pushpull', 'offset', 'followme', 'move', 'rotate', 'scale', 'paint', 'eraser', 'tape', 'dimension', 'group', 'ungroup', 'explode', 'delete', 'duplicate', 'instance', 'array', 'union', 'subtract', 'intersect', 'fit', 'viewIso', 'viewTop', 'viewFront', 'viewRight', 'viewBack', 'viewLeft', 'viewBottom', 'zoomExtents', 'projectionOrtho', 'projectionPersp', 'viewShaded', 'viewHiddenLine', 'viewEdges', 'toggleShadows', 'toggleAxes', 'undo', 'redo'];
 
 /** Every user-visible action. One table: labels, shortcuts, membership test. */
 export function isCommand(id: string): id is CommandId {
@@ -124,6 +130,12 @@ export function commandDescribe(id: CommandId): { readonly id: CommandId; readon
       return { id: 'tape', label: commandLabels['tape'] };
     case 'dimension':
       return { id: 'dimension', label: commandLabels['dimension'] };
+    case 'group':
+      return { id: 'group', label: commandLabels['group'] };
+    case 'ungroup':
+      return { id: 'ungroup', label: commandLabels['ungroup'] };
+    case 'explode':
+      return { id: 'explode', label: commandLabels['explode'] };
     case 'delete':
       return { id: 'delete', label: commandLabels['delete'] };
     case 'duplicate':

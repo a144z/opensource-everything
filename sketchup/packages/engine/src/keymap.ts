@@ -67,3 +67,12 @@ export function commandForEvent(
   }
   return null;
 }
+
+/**
+ * The command a user *typed* into a shortcut field, canonicalised.
+ *
+ * Exported because the keymap editor must store what `bindKey` would produce:
+ * saving "Ctrl+Shift+G" while `bindKey` emits "ctrl+shift+g" would make the
+ * shortcut look bound and never fire.
+ */
+export const canonicalShortcut = normaliseShortcut;

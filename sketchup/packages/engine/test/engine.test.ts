@@ -11,6 +11,7 @@ import {
   renameSolid,
   serializeJson,
   setEnvelope,
+  translateSolids,
   type SolidRecipe,
 } from "../src/index.js";
 
@@ -29,11 +30,40 @@ describe("document", () => {
     expect(doc.envelope).toBeNull();
     expect(doc.section).toBeNull();
     expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(3); // bump this test only with a real migration
+    expect(SCHEMA_VERSION).toBe(4); // bump this test only with a real migration
   });
 });
 
 describe("session history", () => {
+  it("a batch of moves is one undo step and restores all of them", () => {
+    // Task L2-9: a tool gesture is one undo step. Dragging ten objects used to
+    // be ten entries, so Ctrl+Z walked them back one at a time.
+    const s = new Session();
+    for (let i = 0; i < 10; i++) s.execute(addSolid(boxRecipe(10, 10, 10, [i * 20, 0, 0])));
+    const ids = [...s.document.solids.keys()];
+    const before = s.hash();
+    const depth = s.historyDepth;
+    s.batch(ids.map((id) => translateSolids([id], [0, 0, 100])));
+    expect(s.historyDepth).toBe(depth + 1);
+    for (const id of ids) expect(s.boundsOf(id).min[2]).toBeCloseTo(100, 6);
+    s.undo();
+    expect(s.hash()).toBe(before);
+    for (const id of ids) expect(s.boundsOf(id).min[2]).toBeCloseTo(0, 6);
+  });
+
+  it("a batch that fails partway leaves the document untouched", () => {
+    const s = new Session();
+    s.execute(addSolid(boxRecipe(10, 10, 10)));
+    const id = [...s.document.solids.keys()][0]!;
+    const before = s.hash();
+    const depth = s.historyDepth;
+    expect(() =>
+      s.batch([translateSolids([id], [0, 0, 50]), translateSolids(["nope"], [0, 0, 50])]),
+    ).toThrow();
+    expect(s.hash()).toBe(before);
+    expect(s.historyDepth).toBe(depth);
+  });
+
   it("undo/redo of a single add round-trips", () => {
     const s = new Session();
     s.execute(addSolid(boxRecipe(1, 1, 1)));

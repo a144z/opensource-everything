@@ -141,6 +141,39 @@ export interface CreateBoxOptions {
   readonly origin?: Vec3;
 }
 
+/**
+ * Concatenate meshes into one, re-basing each child's indices.
+ *
+ * Child vertices are never welded, even when two children share a face: welding
+ * would join separate solids into one shell and make `isClosedMesh` report the
+ * union as open. A group is a bag of solids that moves together, not a boolean,
+ * so the honest merge keeps every child whole.
+ *
+ * Empty input gives an empty mesh rather than throwing: a group can legally
+ * contain nothing while the user is still assembling it.
+ */
+export function mergeMeshes(meshes: readonly MeshData[]): MeshData {
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (const m of meshes) {
+    vertexCount += m.positions.length / 3;
+    indexCount += m.indices.length;
+  }
+  const positions = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(indexCount);
+  let vp = 0;
+  let ip = 0;
+  let base = 0;
+  for (const m of meshes) {
+    positions.set(m.positions, vp);
+    for (let i = 0; i < m.indices.length; i++) indices[ip + i] = m.indices[i]! + base;
+    vp += m.positions.length;
+    ip += m.indices.length;
+    base += m.positions.length / 3;
+  }
+  return { positions, indices };
+}
+
 /** Axis-aligned closed box. Origin is the min corner. */
 export function createBox(opts: CreateBoxOptions): MeshData {
   const { width, height, depth, origin = [0, 0, 0] } = opts;

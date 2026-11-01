@@ -3,8 +3,10 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import type { Aabb, MeshData, Vec3 } from "@apexus/geometry";
 import {
+  ancestorsThroughGroups,
   dragBox,
   dragDirection,
+  drawnSolids,
   isDegenerate,
   selectByDrag,
   type ScreenBox,
@@ -51,6 +53,8 @@ export interface ViewEvents {
   onMarquee(ids: readonly SolidId[], additive: boolean): void;
   /** Gizmo finished a drag: the object's new world matrix, column-major. */
   onGizmoCommit(id: SolidId, matrix: readonly number[]): void;
+  /** A double-click on a solid: enter it if it is a group. */
+  onEnter(id: SolidId): void;
 }
 
 interface CachedMesh {
@@ -165,6 +169,7 @@ export class View {
     dom.parentElement?.append(overlay);
     this.#marqueeEl = overlay;
     dom.addEventListener("pointerdown", this.#onPointerDown);
+    dom.addEventListener("dblclick", this.#onDoubleClick);
     // Window-level, so a drag that leaves the canvas still ends cleanly.
     window.addEventListener("pointerup", this.#onPointerUp);
     dom.addEventListener("pointermove", this.#onPointerMove);
@@ -395,6 +400,25 @@ export class View {
     if (this.gizmo.object !== c.mesh) this.gizmo.attach(c.mesh);
   }
 
+  /**
+   * Whether right now is a good moment to start a drag on the selected object.
+   *
+   * A member of a group has no mesh of its own (the group draws it), and moving
+   * it would take it out of the group, which is never what a plain drag means.
+   * So the gizmo and the Move/Rotate/Scale tools refuse, and say why: the user
+   * has to enter the group first. SketchUp behaves the same way for the same
+   * reason. A root is always draggable.
+   */
+  canTransform(id: SolidId): { ok: true } | { ok: false; reason: string } {
+    if (this.#cache.has(id)) return { ok: true };
+    const doc = this.#session.document;
+    const solid = doc.solids.get(id);
+    if (!solid) return { ok: false, reason: "That object is no longer in the model." };
+    const owners = ancestorsThroughGroups(doc, id);    if (owners.length === 0) return { ok: true };
+    const name = doc.solids.get(owners[0]!)?.meta.name ?? "a group";
+    return { ok: false, reason: `${solid.meta.name} is inside "${name}". Double-click to enter it, or ungroup first.` };
+  }
+
   dispose(): void {
     window.removeEventListener("keydown", this.#onKeyDown);
     window.removeEventListener("keyup", this.#onKeyUp);
@@ -448,19 +472,33 @@ export class View {
 
   /** Full reconcile: build, rebuild or dispose every mesh. Used on undo/redo/load. */
   sync(): void {
-    this.syncPatches([...this.#session.document.solids.keys()], new Set());
+    const wanted = new Set(drawnSolids(this.#session.document));
+    const stale = [...this.#cache.keys()].filter((id) => !wanted.has(id));
+    this.syncPatches([...wanted], new Set(stale));
     this.#applySection();
   }
 
   /** Reconcile only `touched`; `removed` are ids the patch deleted. */
   syncPatches(touched: Iterable<SolidId>, removed: ReadonlySet<SolidId> = new Set()): void {
+    // A child that moved is already inside its group's merged mesh, and the
+    // group is what draws. Expand the touched set up through every group
+    // ancestor, so editing a member never leaves the parent showing old
+    // triangles. Transform and instance owners are left to their own revision,
+    // because the session bumps it with its dependents.
+    const touchedIds = new Set<SolidId>(touched);
+    const doc0 = this.#session.document;
+    for (const id of [...touchedIds]) {
+      for (const owner of ancestorsThroughGroups(doc0, id)) touchedIds.add(owner);
+    }
+    const touchedSet = touchedIds;
     const doc = this.#session.document;
     for (const id of removed) {
       const cached = this.#cache.get(id);
       if (cached) this.#disposeCache(cached);
       this.#cache.delete(id);
     }
-    for (const id of touched) {
+    for (const id of touchedSet) {
+      if (removed.has(id)) continue;
       const solid = doc.solids.get(id);
       const cached = this.#cache.get(id);
       if (!solid) {
@@ -681,6 +719,12 @@ export class View {
   }
 
   /* -------------------------------------------------------------- input */
+
+  /** Double-click enters a group: the next pick inside it selects the member. */
+  #onDoubleClick = (e: MouseEvent): void => {
+    const hit = this.pick(e.clientX, e.clientY);
+    if (hit?.kind === "solid") this.#events.onEnter(hit.id);
+  };
 
   #onKeyDown = (e: KeyboardEvent): void => {
     if (e.key === "Shift") this.#shift = true;

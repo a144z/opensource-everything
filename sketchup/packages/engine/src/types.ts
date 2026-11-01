@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -81,6 +81,18 @@ export type SolidRecipe =
       readonly kind: "mesh";
       readonly positions: readonly number[];
       readonly indices: readonly number[];
+    })
+  | (RecipeBase & {
+      /**
+       * Group: an ordered set of solids that move, copy and delete as one.
+       *
+       * Unlike `instance` (a reference to a single source), a group owns its
+       * members: the children stay in the document as children, so their meta,
+       * tags and recipes remain editable, and ungrouping is a pure relink.
+       * `members` is ordered because the outliner shows it in that order.
+       */
+      readonly kind: "group";
+      readonly members: readonly SolidId[];
     })
   | (RecipeBase & {
       /** Lathe: a profile ring swept once around an axis in the XZ plane. */

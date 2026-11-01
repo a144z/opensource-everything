@@ -63,6 +63,7 @@ export function baseMesh(recipe: SolidRecipe): MeshData {
     case "boolean":
     case "transform":
     case "instance":
+    case "group":
       throw new Error(`recipe "${recipe.kind}" needs the document; resolve it through the session`);
   }
 }

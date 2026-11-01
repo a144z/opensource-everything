@@ -7,12 +7,13 @@
  * the injected resolver, which is where the kernel lives.
  */
 
-import { aabbFromPoints, type Aabb, type MeshData, type Vec3 } from "@apexus/geometry";
+import { aabbFromPoints, mergeMeshes, type Aabb, type MeshData, type Vec3 } from "@apexus/geometry";
 import { analyseMesh, baseMesh, isStandaloneRecipe, recipeMesh, type SolidGeometry } from "./analyze.js";
 import { emptyDocumentState } from "./commands.js";
 import type { Command, CommandContext } from "./command.js";
 import { checkFit, type FitResult } from "./fit.js";
 import { diffSolids, type SolidDiff } from "./change.js";
+import { drawnSolids, isHiddenByAncestor, refsOf } from "./graph.js";
 import { History, applyPatch, type Patch } from "./history.js";
 import { applyMatrix4, identity4, invertAffine4, isIdentity4, multiply4 } from "./math.js";
 import { validateRecipe as normaliseRecipe } from "./io.js";
@@ -25,21 +26,10 @@ export type KernelResolver = (
 ) => MeshData;
 
 /**
- * The ids a recipe points at, in one place. Used for cycle checks, for deciding
- * which dependents went stale, and for "cannot delete while referenced".
+ * The ids a recipe points at, in one place. Re-exported from `graph.ts` so the
+ * session, the commands and the outliner cannot disagree about ownership.
  */
-export function refsOf(recipe: SolidRecipe): readonly SolidId[] {
-  switch (recipe.kind) {
-    case "boolean":
-      return [recipe.a, recipe.b];
-    case "transform":
-      return [recipe.child];
-    case "instance":
-      return [recipe.source];
-    default:
-      return [];
-  }
-}
+export { refsOf };
 
 function requireRef(doc: DocumentState, recipe: SolidRecipe, id: SolidId, seen: Set<SolidId>): Solid {
   if (seen.has(id)) throw new Error(`solid ${id} is its own ancestor`);
@@ -350,9 +340,10 @@ export class Session {
   fit(): FitResult {
     if (this.#fit) return this.#fit;
     const counted = new Map<SolidId, Aabb>();
-    for (const solid of this.#doc.solids.values()) {
-      if (solid.meta.hidden) continue;
-      counted.set(solid.id, this.boundsOf(solid.id));
+    for (const id of drawnSolids(this.#doc)) {
+      const solid = this.#doc.solids.get(id);
+      if (!solid || solid.meta.hidden || isHiddenByAncestor(this.#doc, id)) continue;
+      counted.set(id, this.boundsOf(id));
     }
     this.#fit = checkFit(counted, this.#doc.envelope);
     return this.#fit;
@@ -422,6 +413,20 @@ export class Session {
       const stripped: SolidRecipe = { ...child.recipe, matrix: multiply4(invertAffine4(origin), childMatrix) };
       const mesh = this.#resolveDeep(doc, stripped, seen2);
       return applyMatrix4(mesh, recipe.matrix);
+    }
+    if (recipe.kind === "group") {
+      // Each member resolves in full (its own matrix included); the group's
+      // matrix is applied to the merged result, so moving a group moves its
+      // contents exactly once. A cycle is caught by the shared `seen` set, which
+      // is why the same set is threaded through every member rather than copied:
+      // A -> B -> A must fail at the repeat, not recurse forever.
+      const merged: MeshData[] = [];
+      for (const member of recipe.members) {
+        const solid = requireRef(doc, recipe, member, seen);
+        const nextSeen = new Set(seen).add(member);
+        merged.push(this.#resolveDeep(doc, solid.recipe, nextSeen));
+      }
+      return applyMatrix4(mergeMeshes(merged), recipe.matrix);
     }
     if (recipe.kind === "boolean") {
       return this.#booleanMesh(doc, recipe, (r) => this.#resolveDeep(doc, r, seen));

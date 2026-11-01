@@ -110,6 +110,11 @@
             <button id="sel-instance" title="A copy that follows every later edit to the source">Instance</button>
           </div>
           <div class="row">
+            <button id="sel-group" title="Treat the selection as one object (Ctrl+G)">Group</button>
+            <button id="sel-ungroup" title="Drop the group and return its objects (Ctrl+Shift+G)">Ungroup</button>
+            <button id="sel-explode" title="Ungroup the groups inside the selection (Shift+G)">Explode</button>
+          </div>
+          <div class="row">
             <label for="opacity" title="Fade the selection to see through it">Opacity</label>
             <input id="opacity" type="range" min="10" max="100" step="5" value="100" />
           </div>
@@ -163,6 +168,7 @@
           <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
           <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
           <button id="zoom" title="Zoom extents (Z)">Zoom</button>
+          <button id="keys-open" title="Change keyboard shortcuts (Ctrl+K)">Shortcuts...</button>
         </section>
 
         <footer>

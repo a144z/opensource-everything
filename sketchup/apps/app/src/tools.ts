@@ -12,6 +12,8 @@ import {
 } from "@apexus/geometry";
 import {
   addSolid as addSolidCmd,
+  angleFromText,
+  deltaFromText,
   duplicateSolid,
   guessAxis,
   makeAnnotation,
@@ -58,6 +60,8 @@ export interface ToolHost {
   paintColor(): string;
   /** Paint: report the colour applied so the host can echo it in a toast. */
   painted(id: SolidId, color: string): void;
+  /** Why this solid cannot be moved/rotated/scaled right now, or null if it can. */
+  transformBlocked(id: SolidId): string | null;
 }
 
 type Pending =
@@ -181,7 +185,32 @@ export class ToolController {
 
   /** Typed digits while a tool is active (numeric entry, task L1-12). */
   typeKey(key: string): boolean {
-    if (!this.#pending) return false;
+    // Move and Rotate accept a typed offset without any half-finished gesture:
+    // select, press M, type "500,0". SketchUp's precision input is a property of
+    // the tool, not of how far the user has got with the mouse, and without it a
+    // user without a steady hand cannot place anything exactly.
+    if (!this.#pending) {
+      if ((this.#tool === "move" || this.#tool === "rotate") && /^[0-9.,\-]$/.test(key)) {
+        this.#typed += key;
+        this.#explainTypedMove();
+        return true;
+      }
+      if (this.#typed && (this.#tool === "move" || this.#tool === "rotate") && key === "Enter") {
+        this.#commitTypedMove();
+        return true;
+      }
+      if (this.#typed && key === "Backspace") {
+        this.#typed = this.#typed.slice(0, -1);
+        this.#explainTypedMove();
+        return true;
+      }
+      if (this.#typed && key === "Escape") {
+        this.#typed = "";
+        this.#host.setHint("Typed input cleared.");
+        return true;
+      }
+      return false;
+    }
     // `,` is the separator in "width,angle"; `.` is the decimal point.
     if (/^[0-9.,\-]$/.test(key)) {
       this.#typed += key;
@@ -199,6 +228,87 @@ export class ToolController {
       return true;
     }
     return false;
+  }
+
+  /** The hint for a typed Move/Rotate offset, before Enter commits it. */
+  #explainTypedMove(): void {
+    const unit = this.#host.unit();
+    const ids = [...this.#host.selection()];
+    if (ids.length === 0) {
+      this.#typed = "";
+      this.#host.setHint(`${this.#tool === "move" ? "Move" : "Rotate"}: select something first.`);
+      return;
+    }
+    if (this.#tool === "rotate") {
+      const deg = angleFromText(this.#typed);
+      this.#host.setHint(
+        deg !== null ? `Rotate ${deg}\u00b0 about Z (Enter to apply)` : `Type an angle in degrees: ${this.#typed}`,
+      );
+      return;
+    }
+    const parts = this.#typed.split(",");
+    const shown = parts.map((p) => {
+      const parsed = p ? parseLength(p, unit) : null;
+      return parsed ? parsed.mm.toFixed(1) : "?";
+    });
+    this.#host.setHint(`Move by X ${shown[0] ?? "0"}, Y ${shown[1] ?? "0"}, Z ${shown[2] ?? "0"} mm (Enter to apply; commas separate axes)`);
+  }
+
+  /** Enter on a typed offset: one batched command, so one undo step. */
+  #commitTypedMove(): void {
+    const ids = [...this.#host.selection()];
+    const text = this.#typed;
+    this.#typed = "";
+    if (ids.length === 0) {
+      this.#host.setHint("Nothing selected to move.");
+      return;
+    }
+    try {
+      if (this.#tool === "rotate") {
+        const deg = angleFromText(text);
+        if (deg === null) {
+          this.#host.setHint("Rotate needs a number of degrees.");
+          return;
+        }
+        const pivot = this.#pivotForSelection(ids);
+        this.#host.session.batch(ids.map((id) => rotateSolids([id], "z", deg, pivot)));
+        this.#host.setHint(`Rotated ${ids.length} object(s) ${deg}\u00b0 about Z.`);
+        return;
+      }
+      const delta = deltaFromText(text, this.#host.unit());
+      if (delta === null) {
+        this.#host.setHint("Move takes up to three lengths, X,Y,Z.");
+        return;
+      }
+      if (Math.hypot(delta[0], delta[1], delta[2]) < 1e-9) {
+        this.#host.setHint("Move by zero is no change.");
+        return;
+      }
+      this.#host.session.batch(ids.map((id) => translateSolids([id], delta)));
+      this.#host.setHint(`Moved ${ids.length} object(s).`);
+    } catch (err) {
+      this.#host.setHint((err as Error).message);
+    }
+  }
+
+  /**
+   * The pivot a typed rotate turns about: the centre of the selection on the
+   * ground plane. The mouse path lets the user choose it; typing cannot, and a
+   * typed angle that silently turned about the world origin would move objects
+   * the user never asked to move.
+   */
+  #pivotForSelection(ids: readonly SolidId[]): Vec3 {
+    let lo = [Infinity, Infinity, Infinity];
+    let hi = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const b = this.#host.session.boundsOf(id);
+      for (let i = 0; i < 3; i++) {
+        lo[i] = Math.min(lo[i]!, b.min[i]!);
+        hi[i] = Math.max(hi[i]!, b.max[i]!);
+      }
+    }
+    if (!Number.isFinite(lo[0])) return [0, 0, 0];
+    return [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, 0];
   }
 
   #applyTyped(commit = false): void {
@@ -389,6 +499,16 @@ export class ToolController {
   }
 
   click(hit: PickHit, additive: boolean, clientX: number, clientY: number, copy = false): void {
+    // Ask once, at the start of a transform, whether these objects can move at
+    // all. A group member cannot: say so on the first click, not after the user
+    // has already clicked a grab point and an end point.
+    if ((this.#tool === "move" || this.#tool === "rotate" || this.#tool === "scale") && !this.#pending) {
+      const blocked = this.#host.selection().map((id) => this.#host.transformBlocked(id)).find((r) => r !== null);
+      if (blocked) {
+        this.#host.setHint(blocked);
+        return;
+      }
+    }
     switch (this.#tool) {
       case "rotatedRectangle":
         this.#clickRotatedRect(hit, clientX, clientY);
@@ -865,11 +985,11 @@ export class ToolController {
         return;
       }
       try {
-        for (const id of ids) {
-          this.#host.session.execute(
-            p.copy ? duplicateSolid(id, delta) : translateSolids([id], delta),
-          );
-        }
+        // One undo step for the whole gesture: dragging four objects and
+        // pressing Ctrl+Z must put all four back, not the last one.
+        this.#host.session.batch(
+          ids.map((id) => (p.copy ? duplicateSolid(id, delta) : translateSolids([id], delta))),
+        );
         this.#host.setHint(
           `${p.copy ? "Copied" : "Moved"} ${ids.length} object(s) ${fmt(Math.hypot(delta[0], delta[1], delta[2]))} mm.`,
         );
@@ -902,8 +1022,7 @@ export class ToolController {
         return;
       }
       try {
-        for (const id of ids) this.#host.session.execute(rotateSolids([id], "z", degrees, p.pivot));
-        this.#host.setHint(`Rotated ${ids.length} object(s) ${degrees.toFixed(1)} deg about Z.`);
+        this.#host.session.batch(ids.map((id) => rotateSolids([id], "z", degrees, p.pivot)));        this.#host.setHint(`Rotated ${ids.length} object(s) ${degrees.toFixed(1)} deg about Z.`);
       } catch (err) {
         this.#host.setHint((err as Error).message);
       }

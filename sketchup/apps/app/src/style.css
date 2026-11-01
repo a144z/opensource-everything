@@ -123,6 +123,47 @@ button.active {
 #outliner li.group:hover {
   background: transparent;
 }
+/*
+ * A group row wraps to two lines: its own row, then its children's <ul>. A row
+ * that holds children must therefore be a block, or the list would sit beside
+ * the swatch instead of under it.
+ */
+#outliner li:has(> ul.children) {
+  display: block;
+  padding-bottom: 0;
+}
+#outliner li:has(> ul.children) > .chip,
+#outliner li:has(> ul.children) > .swatch,
+#outliner li:has(> ul.children) > .name,
+#outliner li:has(> ul.children) > .icon {
+  display: inline-flex;
+  vertical-align: middle;
+}
+#outliner ul.children {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 14px;
+  border-left: 1px solid var(--line, #333);
+  margin-left: 8px;
+}
+#outliner li .chip {
+  flex: none;
+  width: 14px;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+}
+#outliner li .chip:disabled {
+  cursor: default;
+  color: var(--accent);
+}
+#outliner li .chip:hover:not(:disabled) {
+  color: var(--accent);
+}
 
 .fit label {
   display: flex;
@@ -468,6 +509,33 @@ kbd {
 #palette-list li.active kbd {
   border-color: #1b1d2166;
   color: inherit;
+}
+/*
+ * A shortcut you can change says so: the ones you can click look clickable, the
+ * one being recorded pulses, and a refusal flashes red before the old value
+ * comes back. Without the last one a clash looks like the click did nothing.
+ */
+#palette-list kbd.editable {
+  cursor: pointer;
+}
+#palette-list kbd.editable:hover {
+  border-color: var(--accent, #e8b04b);
+}
+#palette-list kbd.recording {
+  border-color: var(--accent, #e8b04b);
+  animation: kbd-pulse 0.9s ease-in-out infinite alternate;
+}
+#palette-list kbd.refused {
+  border-color: #e87f7f;
+  color: #e87f7f;
+}
+@keyframes kbd-pulse {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 #palette-list li.none {

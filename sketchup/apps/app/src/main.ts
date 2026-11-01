@@ -6,21 +6,31 @@ import {
   AnnotationStore,
   Session,
   addSolid,
+  ancestorsThroughGroups,
   arrayCopy,
   booleanSolids,
+  bindShortcut,
   centreInEnvelope,
   commandAll,
   commandForEvent,
   commandKeys,
   commandLabels,
   deleteSolids,
+  descendantsOf,
   deserializeJson,
   dimensionLength,
+  drawnSolids,
   duplicateSolid,
+  effectiveKeys,
   fitToEnvelope,
+  groupSolids,
   instanceCopy,
   isCommand,
+  isHiddenByAncestor,
+  parseOverrides,
   renameSolid,
+  rootsOf,
+  serialiseOverrides,
   serializeJson,
   setColor,
   setEnvelope,
@@ -32,6 +42,7 @@ import {
   setTag,
   setTagVisible,
   tagsInUse,
+  ungroupSolid,
   type CommandId,
   type FitResult,
   type Solid,
@@ -65,11 +76,26 @@ let selection: ReadonlySet<SolidId> = new Set();
 let gizmoMode: "translate" | "rotate" | "scale" = "translate";
 let projection: "ortho" | "perspective" = "ortho";
 const cursor = { x: 0, y: 0 };
+/** Folded group ids: outliner view state, never persisted, never a command. */
+const collapsed = new Set<SolidId>();
+/**
+ * The group the user is inside, or null at the model's top level.
+ *
+ * This is view state, not document state: entering a group changes what a click
+ * means, not what the model is, so it must never enter the undo stack or the
+ * file. It exists so a click can reach a member instead of being swallowed by
+ * the group that owns it.
+ */
+let contextId: SolidId | null = null;
 
 const view = new View(viewport, session, {
   onPick: (hit: PickHit, additive, copy) => {
-    tools.click(hit, additive, cursor.x, cursor.y, copy ?? false);
-    if (hit.kind === "solid" && additive) setSelection([hit.id], true);
+    // A click inside a group means the member, not the group: resolve the hit
+    // through the context so every tool (and the selection) sees the object the
+    // user is actually pointing at. Outside the group the group is the object.
+    const resolved = hit.kind === "solid" ? withContext(hit) : hit;
+    tools.click(resolved, additive, cursor.x, cursor.y, copy ?? false);
+    if (resolved.kind === "solid" && additive) setSelection([resolved.id], true);
     renderPanel();
   },
   onHover: (point) => tools.hover(point, cursor.x, cursor.y),
@@ -91,6 +117,7 @@ const view = new View(viewport, session, {
     }
     refresh();
   },
+  onEnter: (id) => enterGroup(id),
 });
 
 const tools = new ToolController({
@@ -116,6 +143,10 @@ const tools = new ToolController({
     refresh();
   },
   paintColor: () => paintColor,
+  transformBlocked: (id) => {
+    const verdict = view.canTransform(id);
+    return verdict.ok ? null : verdict.reason;
+  },
   painted: (id, color) => {
     // Paint is the one tool that colours without a selection, so it must not
     // disturb what is already selected.
@@ -296,6 +327,77 @@ function makeLabel(text: string, at: Vec3): THREE.Sprite {
  * Selection is a set. A plain click replaces it; Shift-click toggles one object
  * so Move and Rotate can act on several (task L2-4c).
  */
+/**
+ * Map a hit on a drawn mesh onto the object the current context points at.
+ *
+ * Meshes exist only for drawn solids, so a click always lands on a root or a
+ * referenced child. Inside a group the user means the member under the cursor,
+ * so walk the group's members and keep the innermost one whose bounds contain
+ * the hit point. The point is the ray's impact on the group's surface, so a
+ * member the user can see is a member that contains it; the innermost wins when
+ * a child sits inside its parent's box, which is the one on top.
+ */
+function withContext(hit: Extract<PickHit, { kind: "solid" }>): PickHit {
+  if (contextId === null) return hit;
+  const doc = session.document;
+  let current = doc.solids.get(hit.id);
+  if (!current || current.recipe.kind !== "group") return hit;
+  let best: SolidId | null = null;
+  // Descend while the object under the point is still a group. Each level
+  // prefers the member that owns the context, so following the user into a
+  // nested group keeps landing on the objects they are working with.
+  for (;;) {
+    const recipe = current.recipe;
+    if (recipe.kind !== "group") break;
+    const under = recipe.members.filter((m) => boundsContain(session.boundsOf(m), hit.point));
+    if (under.length === 0) break;
+    const next = under.find((m) => m === contextId || descendantsOf(doc, m).includes(contextId!)) ?? under[0]!;
+    best = next;
+    const child = doc.solids.get(next);
+    if (!child) break;
+    current = child;
+  }
+  if (best === null) return hit;
+  return { ...hit, id: best };
+}
+
+/** Inclusive containment with a hair of slack for float noise at a face. */
+function boundsContain(b: { min: readonly number[]; max: readonly number[] }, p: readonly number[]): boolean {
+  const slack = 1e-6;
+  for (let i = 0; i < 3; i++) {
+    if (p[i]! < b.min[i]! - slack || p[i]! > b.max[i]! + slack) return false;
+  }
+  return true;
+}
+
+/**
+ * Double-click a group to stand inside it. A double-click on something that is
+ * not a group, or on a member, leaves the context alone rather than resetting
+ * it: the user's mistake should not throw them out of where they were working.
+ */
+function enterGroup(id: SolidId): void {
+  const solid = session.document.solids.get(id);
+  if (!solid || solid.recipe.kind !== "group" || solid.recipe.members.length === 0) return;
+  contextId = id;
+  collapsed.delete(id);
+  hint.textContent = `Inside "${solid.meta.name}". Escape to step out.`;
+  refresh();
+}
+
+/**
+ * Step out one level. At the top level Escape clears the selection, which is
+ * what it does in every other tool; the two never fight because a context only
+ * exists after a double-click.
+ */
+function leaveGroup(): void {
+  if (contextId === null) return;
+  const owner = ancestorsThroughGroups(session.document, contextId)[0] ?? null;
+  contextId = owner;
+  const name = owner ? session.document.solids.get(owner)?.meta.name : null;
+  hint.textContent = owner ? `Inside "${name}".` : "Back at the model.";
+  refresh();
+}
+
 function setSelection(ids: readonly SolidId[], additive = false): void {
   if (additive) {
     const next = new Set(selection);
@@ -314,13 +416,16 @@ function setSelection(ids: readonly SolidId[], additive = false): void {
 /**
  * One outliner row. Everything here is a command, so every row action is one
  * undo step and shows up in the palette and the history alike.
+ *
+ * `collapsed` is outliner view state: folded groups, remembered for the session.
  */
-function outlinerRow(solid: Solid): HTMLLIElement {
+function outlinerRow(solid: Solid, depth = 0): HTMLLIElement {
   const li = document.createElement("li");
   li.className = selection.has(solid.id) ? "selected" : "";
   if (solid.meta.hidden) li.classList.add("hidden");
   if (solid.meta.locked) li.classList.add("locked");
   li.dataset["id"] = solid.id;
+  li.style.setProperty("--depth", String(depth));
 
   const swatch = document.createElement("input");
   swatch.type = "color";
@@ -331,6 +436,23 @@ function outlinerRow(solid: Solid): HTMLLIElement {
   swatch.addEventListener("change", () =>
     quietly(() => session.execute(setColor([solid.id], swatch.value)), "Colour changed."),
   );
+
+  // A group row says so, and its triangle folds the tree. Folding is view state
+  // only (`collapsed`), deliberately not a command: a folded group is not an
+  // editable fact and must not land in the undo stack or the project file.
+  const members = solid.recipe.kind === "group" ? solid.recipe.members : [];
+  const folded = collapsed.has(solid.id);
+  const chip = document.createElement("button");
+  chip.className = "chip";
+  chip.title = members.length > 0 ? (folded ? "Expand group" : "Collapse group") : "Group";
+  chip.textContent = members.length === 0 ? "G" : folded ? "\u25b8" : "\u25be";
+  chip.disabled = members.length === 0;
+  chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (folded) collapsed.delete(solid.id);
+    else collapsed.add(solid.id);
+    renderPanel();
+  });
 
   const label = document.createElement("span");
   label.className = "name";
@@ -350,8 +472,20 @@ function outlinerRow(solid: Solid): HTMLLIElement {
     );
   });
 
-  li.append(swatch, label, eye, lock);
+  li.append(chip, swatch, label, eye, lock);
   li.addEventListener("click", () => setSelection([solid.id], true));
+
+  // Children are rows in their own right inside the group's <li>, so a click
+  // still bubbles to the group row's handler and selects exactly what was hit.
+  if (members.length > 0 && !folded) {
+    const kids = document.createElement("ul");
+    kids.className = "children";
+    for (const member of members) {
+      const child = session.document.solids.get(member);
+      if (child) kids.append(outlinerRow(child, depth + 1));
+    }
+    li.append(kids);
+  }
   return li;
 }
 
@@ -441,9 +575,10 @@ function renderPanel(): void {
   $("panel").dataset["commands"] = commandAll.join(",");
   const outliner = $("outliner");
   outliner.innerHTML = "";
-  // Grouping is presentation only: the document has one flat list, and every
-  // row is still one object with the same commands attached.
-  for (const [tag, solids] of groupByTag(doc.solids.values())) {
+  // Nesting is real now: a group owns its members, so the tree mirrors the
+  // document. Tag headings stay at the top level only, because a tag is a
+  // label on an object, not a container that can hold other objects.
+  for (const [tag, solids] of groupByTag(rootsOf(doc).map((id) => doc.solids.get(id)!).filter(Boolean))) {
     if (tag !== null) {
       const head = document.createElement("li");
       head.className = "group";
@@ -452,7 +587,6 @@ function renderPanel(): void {
     }
     for (const solid of solids) outliner.append(outlinerRow(solid));
   }
-
   const fit = session.fit();
   renderFit(fit);
   view.markFailures(failures(), selection);
@@ -482,6 +616,9 @@ function renderPanel(): void {
   ($("sel-array") as HTMLButtonElement).disabled = !enabled;
   ($("sel-duplicate") as HTMLButtonElement).disabled = !enabled;
   ($("sel-instance") as HTMLButtonElement).disabled = !enabled;
+  ($("sel-group") as HTMLButtonElement).disabled = !enabled;
+  ($("sel-ungroup") as HTMLButtonElement).disabled = !commandEnabled("ungroup");
+  ($("sel-explode") as HTMLButtonElement).disabled = !commandEnabled("explode");
 }
 
 function renderFit(fit: FitResult): void {
@@ -535,8 +672,12 @@ function failures(): Set<SolidId> {
   const out = new Set<SolidId>();
   const env = session.document.envelope;
   if (!env) return out;
-  for (const solid of session.document.solids.values()) {
-    if (solid.meta.hidden) continue;
+  const doc = session.document;
+  // Drawn solids only: a group is checked once as a group, not again per member,
+  // or one overrun would redden the same box three times.
+  for (const id of drawnSolids(doc)) {
+    const solid = doc.solids.get(id);
+    if (!solid || solid.meta.hidden || isHiddenByAncestor(doc, id)) continue;
     const b = session.boundsOf(solid.id);
     if (
       b.min[0] < env.min[0] ||
@@ -570,9 +711,13 @@ function saveProject(): void {
 
 function exportStl(): void {
   const parts: { name: string; mesh: ReturnType<typeof session.meshOf> }[] = [];
-  for (const solid of session.document.solids.values()) {
-    if (solid.meta.hidden) continue;
-    parts.push({ name: solid.meta.name.replace(/[^A-Za-z0-9_-]/g, "_"), mesh: session.meshOf(solid.id) });
+  const doc = session.document;
+  // Only drawn solids, or a grouped object would be written twice: once on its
+  // own and once inside its group.
+  for (const id of drawnSolids(doc)) {
+    const solid = doc.solids.get(id);
+    if (!solid || solid.meta.hidden || isHiddenByAncestor(doc, id)) continue;
+    parts.push({ name: solid.meta.name.replace(/[^A-Za-z0-9_-]/g, "_"), mesh: session.meshOf(id) });
   }
   if (parts.length === 0) {
     hint.textContent = "Nothing to export yet.";
@@ -602,6 +747,13 @@ function openProject(file: File): void {
 /* --------------------------------------------------------------- wiring */
 
 function refresh(): void {
+  // A context can be undone away (delete, ungroup, then Ctrl+Z). Rather than
+  // trusting every command to remember, check here: a context that no longer
+  // names a live group is dropped, so a click can never be routed into nothing.
+  if (contextId !== null) {
+    const ctx = session.document.solids.get(contextId);
+    if (!ctx || ctx.recipe.kind !== "group") contextId = null;
+  }
   view.sync();
   renderPanel();
   renderTags();
@@ -721,6 +873,62 @@ function runCommand(id: CommandId): void {
       case "array":
         runArray();
         return;
+      case "group": {
+        const ids = [...selection];
+        if (ids.length === 0) {
+          hint.textContent = "Make Group: select something first.";
+          return;
+        }
+        const patch = session.execute(groupSolids(ids));
+        // A new solid is exactly the one whose backward entry is null; that is
+        // the patch's own definition, so no snapshotting is needed.
+        const created = [...patch.backward].filter(([, s]) => s === null).map(([k]) => k).find((k) => !ids.includes(k));
+        // Selecting the new group is what lets the user name it or move it next;
+        // leaving the children selected would move them out of the group's idea
+        // of "together" on the very next drag.
+        setSelection(created ? [created] : []);
+        hint.textContent = `Grouped ${ids.length} object(s).`;
+        refresh();
+        return;
+      }
+      case "ungroup": {
+        const groups = [...selection].filter((id) => session.document.solids.get(id)?.recipe.kind === "group");
+        if (groups.length === 0) {
+          hint.textContent = "Ungroup: select a group first.";
+          return;
+        }
+        session.batch(groups.map((id) => ungroupSolid(id)));
+        // The wrapper ids are gone; selecting them would leave a phantom
+        // selection that the next Delete would silently ignore.
+        setSelection([]);
+        hint.textContent = `Ungrouped ${groups.length} group(s).`;
+        refresh();
+        return;
+      }
+      case "explode": {
+        const groups = [...selection].filter((id) => session.document.solids.get(id)?.recipe.kind === "group");
+        if (groups.length === 0) {
+          hint.textContent = "Explode: select a group first.";
+          return;
+        }
+        // Explode is ungroup applied to the group's groups, one level deep: the
+        // exact command the user would type twice is not run twice, because the
+        // second pass would silently remove a level they did not ask for.
+        const inner = groups.flatMap((id) => {
+          const recipe = session.document.solids.get(id)?.recipe;
+          return recipe?.kind === "group"
+            ? recipe.members.filter((m) => session.document.solids.get(m)?.recipe.kind === "group")
+            : [];
+        });
+        if (inner.length === 0) {
+          hint.textContent = "Explode: no nested groups inside the selection.";
+          return;
+        }
+        session.batch(inner.map((id) => ungroupSolid(id)));
+        hint.textContent = `Exploded ${inner.length} nested group(s).`;
+        refresh();
+        return;
+      }
       case "union":
       case "subtract":
       case "intersect": {
@@ -793,6 +1001,11 @@ function commandEnabled(id: CommandId): boolean {
     case "subtract":
     case "intersect":
       return count === 2;
+    case "group":
+      return count >= 1;
+    case "ungroup":
+    case "explode":
+      return [...selection].some((id) => session.document.solids.get(id)?.recipe.kind === "group");
     default:
       return true;
   }
@@ -803,7 +1016,29 @@ function selectTool(tool: Tool): void {
   renderPanel();
 }
 
-const palette = new CommandPalette({ run: runCommand, enabled: commandEnabled });
+const palette = new CommandPalette({
+  run: runCommand,
+  enabled: commandEnabled,
+  keys: () => keys,
+  rebind: (id, spec) => {
+    // The keymap lives outside the undo stack on purpose: a shortcut is not part
+    // of the model, and Ctrl+Z after rebinding must undo the last edit, not the
+    // rebind.
+    const result = bindShortcut(commandKeys, overrides, id, spec);
+    if (!result.ok) {
+      if (result.reason === "taken") {
+        const who = result.holder ? commandLabels[result.holder as CommandId] : "another command";
+        return { ok: false, message: `${spec} is already used by ${who}.` };
+      }
+      if (result.reason === "reserved") return { ok: false, message: `${spec} belongs to the browser.` };
+      return { ok: false, message: "That key cannot be used." };
+    }
+    overrides = result.overrides;
+    saveKeymap();
+    hint.textContent = `${commandLabels[id]} is now ${spec}.`;
+    return { ok: true };
+  },
+});
 
 function setGizmo(mode: "translate" | "rotate" | "scale"): void {
   gizmoMode = mode;
@@ -938,6 +1173,10 @@ function applyFinish(): void {
 $("roughness").addEventListener("change", applyFinish);
 $("metallic").addEventListener("change", applyFinish);
 $("sel-instance").addEventListener("click", () => runCommand("instance"));
+$("sel-group").addEventListener("click", () => runCommand("group"));
+$("sel-ungroup").addEventListener("click", () => runCommand("ungroup"));
+$("sel-explode").addEventListener("click", () => runCommand("explode"));
+$("keys-open").addEventListener("click", () => palette.open());
 
 $("tag-apply").addEventListener("click", () => {
   const ids = [...selection];
@@ -1061,8 +1300,15 @@ window.addEventListener("keydown", (e) => {
 
   switch (e.key) {
     case "Escape":
-      tools.cancel();
-      setSelection([]);
+      // A tool's own cancel comes first: Escape should end the half-drawn
+      // rectangle, not also throw the user out of the group they are editing.
+      if (tools.hasPending) {
+        tools.cancel();
+      } else if (contextId !== null) {
+        leaveGroup();
+      } else {
+        setSelection([]);
+      }
       break;
     case "Delete":
     case "Backspace":
@@ -1071,9 +1317,23 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-/** The command a key event maps to, from the generated shortcut table. */
+/**
+ * The user's keymap: generated defaults plus whatever they rebound, kept in
+ * `localStorage` so a rebound key survives a reload. `keys` is the live table
+ * every lookup uses; `commandKeys` is only ever the shipped default.
+ */
+const KEYMAP_KEY = "fitcheck.keymap.v1";
+let overrides = parseOverrides(localStorage.getItem(KEYMAP_KEY));
+let keys: Record<string, string | undefined> = effectiveKeys(commandKeys, overrides);
+
+function saveKeymap(): void {
+  keys = effectiveKeys(commandKeys, overrides);
+  localStorage.setItem(KEYMAP_KEY, serialiseOverrides(overrides));
+}
+
+/** The command a key event maps to, from the user's keymap. */
 function shortcutFor(e: KeyboardEvent): CommandId | null {
-  return commandForEvent(commandKeys, e) as CommandId | null;
+  return commandForEvent(keys, e) as CommandId | null;
 }
 
 view.renderer.domElement.addEventListener("pointermove", (e) => {
@@ -1151,6 +1411,38 @@ interface FitCheckHarness {
   paintFirst(color: string): boolean;
   solids(): { id: string; name: string; color: string }[];
   undoCount(): number;
+  /** Select every top-level object, the way a marquee over all of it would. */
+  selectAll(): number;
+  /** Group/ungroup observations: what the outliner draws and what is inside. */
+  groups(): { id: string; name: string; members: string[]; rows: number }[];
+  /** How many outliner rows the tree currently shows, nesting included. */
+  outlinerRows(): number;
+  /** The group the user is editing, or null. */
+  context(): string | null;
+  /** Simulated double-click on a group, through the same handler as the mouse. */
+  enter(id: string): boolean;
+  /** Escape, through the same handler as the keyboard. */
+  escape(): void;
+  /** Type a string into the tool as if through the keyboard, then optionally Enter. */
+  typeText(text: string, enter: boolean): void;
+  /** Bounds minimum of a solid, in mm, so a move can be measured. */
+  minOf(id: string): number[] | null;
+  /** [minX,minY,minZ,maxX,maxY,maxZ] of a solid, in mm. */
+  boundsOf(id: string): number[];
+  /** ids of every top-level object. */
+  rootIds(): string[];
+  /** Select exactly one object. */
+  selectOnly(id: string): void;
+  /** Choose a tool exactly as the toolbar button does. */
+  useTool(tool: string): void;
+  /** The stored keymap text, or null, so persistence can be checked. */
+  keymapStorage(): string | null;
+  /** Rebind through the same path the palette uses. */
+  rebind(id: string, spec: string): { ok: boolean; message?: string };
+  /** Press a key through the app's real handler (not the harness shortcut). */
+  pressKey(key: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }): void;
+  /** What shortcut a given key would now run, if any. */
+  commandForKey(key: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean }): string | null;
 }
 
 declare global {
@@ -1197,5 +1489,86 @@ window.fitcheck = {
   solids: () =>
     [...session.document.solids.values()].map((s) => ({ id: s.id, name: s.meta.name, color: s.meta.color })),
   undoCount: () => session.historyDepth,
+  selectAll() {
+    const roots = rootsOf(session.document);
+    setSelection(roots);
+    return roots.length;
+  },
+  groups: () =>
+    [...session.document.solids.values()]
+      .filter((s) => s.recipe.kind === "group")
+      .map((s) => ({
+        id: s.id,
+        name: s.meta.name,
+        members: s.recipe.kind === "group" ? [...s.recipe.members] : [],
+        rows: document.querySelectorAll("#outliner li[data-id]").length,
+      })),
+  outlinerRows: () => document.querySelectorAll("#outliner li[data-id]").length,
+  context: () => contextId,
+  enter(id) {
+    enterGroup(id);
+    return contextId === id;
+  },
+  escape() {
+    if (tools.hasPending) {
+      tools.cancel();
+    } else if (contextId !== null) {
+      leaveGroup();
+    } else {
+      setSelection([]);
+    }
+  },
+  typeText(text, enter) {
+    for (const ch of text) tools.typeKey(ch);
+    if (enter) tools.typeKey("Enter");
+  },
+  minOf(id) {
+    const solid = session.document.solids.get(id as SolidId);
+    if (!solid) return null;
+    const b = session.boundsOf(solid.id);
+    return [...b.min];
+  },
+  rootIds: () => rootsOf(session.document),
+  selectOnly(id) {
+    setSelection([id as SolidId]);
+  },
+  boundsOf(id) {
+    const solid = session.document.solids.get(id as SolidId);
+    if (!solid) return [0, 0, 0, 0, 0, 0];
+    const b = session.boundsOf(solid.id);
+    return [...b.min, ...b.max];
+  },  useTool(tool) {
+    runCommand(tool as CommandId);
+  },
+  keymapStorage: () => localStorage.getItem(KEYMAP_KEY),
+  rebind: (id, spec) => {
+    const result = bindShortcut(commandKeys, overrides, id, spec);
+    if (!result.ok) {
+      return { ok: false, message: result.reason === "taken" ? `${spec} is taken.` : `${spec} cannot be used.` };
+    }
+    overrides = result.overrides;
+    saveKeymap();
+    return { ok: true };
+  },
+  pressKey(key, mods) {
+    const e = new KeyboardEvent("keydown", {
+      key,
+      ctrlKey: mods?.ctrlKey ?? false,
+      shiftKey: mods?.shiftKey ?? false,
+      altKey: mods?.altKey ?? false,
+      bubbles: true,
+    });
+    window.dispatchEvent(e);
+  },
+  commandForKey: (key, mods) => {
+    const bindable = {
+      key,
+      ctrlKey: mods?.ctrlKey ?? false,
+      shiftKey: mods?.shiftKey ?? false,
+      altKey: mods?.altKey ?? false,
+      metaKey: false,
+    };
+    return commandForEvent(keys, bindable);
+  },
 };
 

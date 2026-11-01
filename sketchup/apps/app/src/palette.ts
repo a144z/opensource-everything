@@ -7,13 +7,24 @@
  * command semantics in one place.
  */
 
-import { commandAll, commandDescribe, commandKeys, commandLabels, rank, type CommandId } from "@apexus/engine";
+import { commandAll, commandDescribe, commandLabels, rank, type CommandId } from "@apexus/engine";
 
 export interface PaletteOptions {
   /** Runs the command; the palette closes first so focus returns to the canvas. */
   run(id: CommandId): void;
   /** Optional extra filter: a command the current state cannot run is hidden. */
   enabled?(id: CommandId): boolean;
+  /**
+   * The user's live shortcut table. Passed in rather than imported so a rebound
+   * key shows what the user actually has, not the shipped default, and so the
+   * palette never needs to know where the keymap is stored.
+   */
+  keys?(): Readonly<Record<string, string | undefined>>;
+  /**
+   * Rebind a command, or return a refusal reason. Present only when the palette
+   * should offer editing; without it the shortcut is shown read-only.
+   */
+  rebind?(id: CommandId, spec: string): { ok: true } | { ok: false; message: string };
 }
 
 const ALL = commandAll.map((id) => ({ id, label: commandLabels[id] }));
@@ -82,8 +93,21 @@ export class CommandPalette {
         li.dataset["id"] = hit.item.id;
         li.append(...highlight(hit.item.label, hit.hits));
 
-        const key = commandKeys[hit.item.id];
-        if (key) {
+        const key = this.#options.keys?.()[hit.item.id];
+        if (this.#options.rebind) {
+          // A shortcut that is clickable to change it. Recording happens here,
+          // so the editor cannot drift from the list it edits.
+          const kbd = document.createElement("kbd");
+          kbd.className = "editable";
+          kbd.textContent = key ?? "click to set";
+          kbd.title = "Click, then press the new keys";
+          kbd.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.#record(kbd, hit.item.id);
+          });
+          li.append(kbd);
+        } else if (key) {
           const kbd = document.createElement("kbd");
           kbd.textContent = key;
           li.append(kbd);
@@ -135,6 +159,63 @@ export class CommandPalette {
     this.close();
     if (id) this.#options.run(id);
   }
+
+  /**
+   * Record one keystroke for `id`. The binding is stored in canonical form
+   * (`ctrl+shift+g`), which is what the lookup compares, so the editor and the
+   * keyboard can never disagree about spelling. Escape cancels; a refusal (key
+   * already taken, key the browser needs) is shown on the row and nothing is
+   * saved, because a half-applied binding is a shortcut that silently never runs.
+   */
+  #record(kbd: HTMLElement, id: CommandId): void {
+    const previous = kbd.textContent ?? "";
+    kbd.textContent = "press keys...";
+    kbd.classList.add("recording");
+    const done = (): void => {
+      window.removeEventListener("keydown", onKey, true);
+      kbd.classList.remove("recording");
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        kbd.textContent = previous;
+        done();
+        return;
+      }
+      // A bare modifier is not a shortcut; wait for a real key.
+      if (["Control", "Meta", "Alt", "Shift"].includes(e.key)) return;
+      const spec = describeBinding(e);
+      done();
+      const result = this.#options.rebind?.(id, spec);
+      if (result && !result.ok) {
+        kbd.textContent = previous;
+        kbd.classList.add("refused");
+        kbd.title = result.message;
+        window.setTimeout(() => kbd.classList.remove("refused"), 1200);
+        return;
+      }
+      this.#render();
+    };
+    window.addEventListener("keydown", onKey, true);
+  }
+}
+
+/**
+ * A key event as the table spells it: `Ctrl+Shift+G`, `Delete`, ` `.
+ *
+ * This is the inverse of `bindKey` and is here rather than in the engine because
+ * it is about turning an event into *text a person reads*, not about deciding
+ * which command a key names.
+ */
+export function describeBinding(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">): string {
+  const parts: string[] = [];
+  if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  parts.push(key);
+  return parts.join("+");
 }
 
 /** Split a label into plain and matched spans, so the matched letters stand out. */

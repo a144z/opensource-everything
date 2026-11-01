@@ -230,7 +230,7 @@ describe("schema 3 migration", () => {
       ],
     });
     const solid = doc.solids.get("s1")!;
-    expect(doc.schemaVersion).toBe(3);
+    expect(doc.schemaVersion).toBe(4);
     expect(solid.meta.roughness).toBeCloseTo(0.75, 6);
     expect(solid.meta.metallic).toBe(0);
     expect(solid.meta.tag).toBe("Walls");
@@ -247,6 +247,8 @@ describe("schema 3 migration", () => {
     });
     expect(doc.solids.get("s1")!.meta.opacity).toBe(1);
     expect(doc.solids.get("s1")!.meta.roughness).toBeCloseTo(0.75, 6);
+    // A 1-file walks every step in order (1 -> 2 -> 3 -> 4), not just the last.
+    expect(doc.schemaVersion).toBe(4);
   });
 
   it("finish is clamped on write and on read", () => {

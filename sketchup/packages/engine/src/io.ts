@@ -54,10 +54,15 @@ type Upgrader = (raw: Raw) => Raw;
  * 2 -> 3: added `meta.roughness`/`meta.metallic` and the `instance` + `lathe`
  * recipes. Again every new field defaults to the 2-file meaning (no sheen, no
  * metal); the new recipe kinds simply never appear in a 2-file.
+ *
+ * 3 -> 4: added the `group` recipe. A 3-file has no groups, so it upgrades by
+ * being understood; the group reader still refuses an empty member list, so a
+ * 4-file can never contain a group that meshes to nothing.
  */
 const MIGRATIONS: Record<number, Upgrader> = {
   1: (raw) => ({ ...raw, schemaVersion: 2 }),
   2: (raw) => ({ ...raw, schemaVersion: 3 }),
+  3: (raw) => ({ ...raw, schemaVersion: 4 }),
 };
 
 export function deserialize(raw: unknown): DocumentState {
@@ -158,6 +163,8 @@ export function deserializeJson(text: string): DocumentState {
       return [recipe.child];
     case "instance":
       return [recipe.source];
+    case "group":
+      return recipe.members;
     default:
       return [];
   }
@@ -170,6 +177,7 @@ const KINDS = new Set<SolidRecipe["kind"]>([
   "boolean",
   "transform",
   "instance",
+  "group",
   "mesh",
   "lathe",
 ]);
@@ -240,6 +248,23 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
         ...(raw.origin === undefined ? {} : { origin: nums(raw.origin, 16, "origin") }),
         matrix,
       };
+    case "group": {
+      if (!Array.isArray(raw.members) || raw.members.length === 0) {
+        throw new Error(`solid ${id} group needs at least one member`);
+      }
+      const members = raw.members.map((m, i) => {
+        if (typeof m !== "string" || m === "") throw new Error(`solid ${id} group member[${i}] must be an id`);
+        return m;
+      });
+      if (members.includes(id)) throw new Error(`solid ${id} cannot be a member of itself`);
+      // A duplicate member would be meshed twice: the group's volume, bounds and
+      // hash would all be wrong. Refuse it here rather than dedupe silently,
+      // because a duplicate id is always a caller bug worth surfacing.
+      if (new Set(members).size !== members.length) {
+        throw new Error(`solid ${id} group lists a member twice`);
+      }
+      return { kind: "group", members, matrix };
+    }
     case "lathe": {
       if (!Array.isArray(raw.points) || raw.points.length < 3) throw new Error(`solid ${id} lathe needs 3+ profile points`);
       const points = raw.points.map((p, i) => nums(p, 2, `points[${i}]`) as [number, number]);
