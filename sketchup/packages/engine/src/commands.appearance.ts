@@ -130,7 +130,7 @@ export function setTagVisible(tag: string, visible: boolean): Command {
     label,
     apply(doc) {
       const ids = [...doc.solids.values()]
-        .filter((solid) => solid.meta.tag === name && solid.meta.hidden === !visible)
+        .filter((solid) => solid.meta.tag === name && solid.meta.hidden !== !visible)
         .map((solid) => solid.id);
       return metaPatch(doc, ids, (meta) => ({ ...meta, hidden: !visible }), label);
     },

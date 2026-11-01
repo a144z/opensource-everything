@@ -40,6 +40,10 @@ _blockforge_*
 # private; the emitted table is ordinary product source.
 !/sketchup/packages/engine/src/commands.gen.ts
 
+# Harness gate output (logs and per-step status live here, regenerated freely)
+**/.harness/logs/
+**/__pycache__/
+
 # Build output and dependencies
 node_modules/
 dist/

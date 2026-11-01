@@ -23,9 +23,21 @@ describe("formatFeetInches", () => {
   });
 
   it("rounds to the nearest sixteenth, not down", () => {
-    // 1/32" above 1" must read 1", and 3/32" must round up to 1/8".
+    // 0.79 mm is 1/32" (0.79375); 2.38 mm is just past 1/16" (1.5875) and below
+    // 3/32" (2.38125), so it is nearer 1/16" and must read 1 1/16".
     expect(formatFeetInches(25.4 + 0.79)).toBe('1"');
-    expect(formatFeetInches(25.4 + 2.38)).toBe('1 1/8"');
+    expect(formatFeetInches(25.4 + 2.38)).toBe('1 1/16"');
+  });
+
+  it("rounds a length that should land exactly on a mark up, never down", () => {
+    // A mark is a whole number of sixteenths, so it divides by 25.4 * 16 cleanly.
+    // 1 3/16" is 30.1625 mm; delivered as a float it can sit a hair under the
+    // mark, and the nudge keeps it on the mark instead of reading 1 1/8".
+    expect(formatFeetInches(30.1625)).toBe('1 3/16"');
+    expect(formatFeetInches(30.1625 - 1e-9)).toBe('1 3/16"');
+    // Clearly between two marks rounds to the nearer one, either way.
+    expect(formatFeetInches(2.3)).toBe('1/16"');
+    expect(formatFeetInches(2.9)).toBe('1/8"');
   });
 
   it("keeps the sign in front of the feet", () => {

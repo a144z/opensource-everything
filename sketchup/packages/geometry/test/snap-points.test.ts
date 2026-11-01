@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import { createBox } from "../src/index.js";
 import {
   boundsQuadrants,
@@ -17,7 +17,7 @@ const near = (a: readonly number[], b: readonly number[]): boolean =>
 
 describe("face centres", () => {
   it("gives one centre per plane, not per triangle", () => {
-    const centres = faceCentres(box.positions);
+    const centres = faceCentres(box);
     // A box has six faces; two triangles each would give twelve centres, and
     // the cursor would find two "Centre" points a few mm apart.
     expect(centres).toHaveLength(6);
@@ -26,13 +26,13 @@ describe("face centres", () => {
   });
 
   it("puts the top face centre where a user expects to pull", () => {
-    const centres = faceCentres(box.positions);
+    const centres = faceCentres(box);
     const top = centres.find((c) => near(c.point, [50, 25, 20]));
     expect(top, JSON.stringify(centres.map((c) => c.point))).toBeDefined();
   });
 
   it("carries the face normal, so a pull knows which way to go", () => {
-    const centres = faceCentres(box.positions);
+    const centres = faceCentres(box);
     const top = centres.find((c) => near(c.point, [50, 25, 20]))!;
     expect(top.normal).toBeDefined();
     expect(top.normal![2]).toBeCloseTo(1, 6);
@@ -41,13 +41,13 @@ describe("face centres", () => {
   });
 
   it("survives degenerate triangles without inventing a centre", () => {
-    // Two coincident points and the same point again: zero area, no plane.
-    const flat = new Float32Array([0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // Three coincident corners: zero area, no plane, so no face and no centre.
+    const flat = { positions: new Float32Array([0, 0, 0, 0, 0, 0, 0, 0, 0]), indices: new Uint32Array([0, 1, 2]) };
     expect(faceCentres(flat)).toHaveLength(0);
   });
 
   it("is an empty list for an empty mesh", () => {
-    expect(faceCentres(new Float32Array())).toHaveLength(0);
+    expect(faceCentres({ positions: new Float32Array(), indices: new Uint32Array() })).toHaveLength(0);
   });
 });
 
@@ -90,7 +90,7 @@ describe("foot of a perpendicular", () => {
   });
 
   it("finds feet on an object's edges that are within reach", () => {
-    const feet = perpendicularFeet([50, 400, 20], box.positions, 1000);
+    const feet = perpendicularFeet([50, 400, 20], box, 1000);
     expect(feet.length).toBeGreaterThan(0);
     for (const f of feet) expect(f.kind).toBe("perpendicular");
     // The top-back edge at y=50, z=20 has its foot directly above the origin.
@@ -98,7 +98,7 @@ describe("foot of a perpendicular", () => {
   });
 
   it("finds nothing when the edges are further than the tolerance", () => {
-    expect(perpendicularFeet([50, 5000, 20], box.positions, 10)).toHaveLength(0);
+    expect(perpendicularFeet([50, 5000, 20], box, 10)).toHaveLength(0);
   });
 });
 
@@ -127,7 +127,7 @@ describe("ranking the new points", () => {
   it("passes a face normal through to the caller", () => {
     const r = infer({
       cursor: [50, 25, 20],
-      candidates: faceCentres(box.positions),
+      candidates: faceCentres(box),
       mmPerPixel: 1,
     });
     expect(r.glyph.kind).toBe("centre");

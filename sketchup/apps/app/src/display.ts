@@ -36,14 +36,24 @@ export function isUnit(value: string): value is Unit {
 export function formatFeetInches(mm: number): string {
   if (!Number.isFinite(mm)) return "";
   const sign = mm < 0 ? "-" : "";
-  const sixteenths = Math.round((Math.abs(mm) / 25.4) * 16);
+  // Every part is derived from one integer count of sixteenths, so the rounding
+  // happens once and nothing is truncated: a length near a boundary must not read
+  // as the next sixteenth down. A length arrives in millimetres, and 25.4 mm is
+  // itself a rounded decimal, so a value that should land exactly on a sixteenth
+  // (3/32 inch is 2.38125 mm) can arrive a few float units below it; `Math.round`
+  // would then drop it. The nudge is a millionth of a sixteenth, far below
+  // anything a tape shows.
+  const sixteenths = Math.round((Math.abs(mm) / 25.4) * 16 + 1e-6);
   const feet = Math.floor(sixteenths / 192);
   const rest = sixteenths - feet * 192;
   const inches = Math.floor(rest / 16);
   const fraction = reduce(rest - inches * 16, 16);
 
-  const inchText = `${inches}${fraction === "" ? "" : ` ${fraction}`}\"`;
   const footText = feet === 0 ? "" : `${feet}'`;
+  // Zero is written only when it is the whole answer: a bare suffix (`"`) is not
+  // a length, while `3' 0"` is what a tape shows for exactly three feet.
+  const whole = inches === 0 && fraction === "" ? "0" : inches === 0 ? "" : `${inches}`;
+  const inchText = [whole, fraction].filter((s) => s !== "").join(" ") + "\"";
   return sign + [footText, inchText].filter((s) => s !== "").join(" ");
 }
 

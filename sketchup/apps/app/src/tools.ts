@@ -367,11 +367,13 @@ export class ToolController {
       return;
     }
     const parts = this.#typed.split(",");
-    const shown = parts.map((p) => {
-      const parsed = p ? parseLength(p, unit) : null;
-      return parsed ? parsed.mm.toFixed(1) : "?";
-    });
-    this.#host.setHint(`Move by X ${shown[0] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[0].mm)}, Y ${shown[1] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[1].mm)}, Z ${shown[2] === undefined ? "-" : formatLengthIn(this.#host.unit(), shown[2].mm)} (Enter to apply; commas separate axes)`);
+    // Each axis is shown in the reader's unit; a blank or unparsable axis is "-".
+    const at = (i: number): string => {
+      const text = parts[i];
+      const parsed = text ? parseLength(text, unit) : null;
+      return parsed ? formatLengthIn(this.#host.unit(), parsed.mm) : "-";
+    };
+    this.#host.setHint(`Move by X ${at(0)}, Y ${at(1)}, Z ${at(2)} (Enter to apply; commas separate axes)`);
   }
 
   /** Enter on a typed offset: one batched command, so one undo step. */
@@ -437,15 +439,18 @@ export class ToolController {
     const parsed = this.#typed ? parseLength(this.#typed, this.#host.unit()) : null;
     // A rectangle is the one shape where typing two numbers is natural, so
     // `600,400` is read before the single-length path would refuse it.
-    const pair = p?.kind === "rect" ? this.#typedSize() : null;
-    if (pair) {
-      const sx = Math.sign(p!.current[0] - p!.start[0]) || 1;
-      const sy = Math.sign(p!.current[1] - p!.start[1]) || 1;
-      p!.current = [p!.start[0] + sx * pair[0], p!.start[1] + sy * pair[1]];
-      this.#drawRect(p!.start, p!.current);
+    // `pair` already implied `kind === "rect"`; the narrowing is restated here
+    // because this.#typedSize() is a method call, which TS cannot narrow through.
+    const rect = p?.kind === "rect" ? p : null;
+    const pair = rect ? this.#typedSize() : null;
+    if (pair && rect) {
+      const sx = Math.sign(rect.current[0] - rect.start[0]) || 1;
+      const sy = Math.sign(rect.current[1] - rect.start[1]) || 1;
+      rect.current = [rect.start[0] + sx * pair[0], rect.start[1] + sy * pair[1]];
+      this.#drawRect(rect.start, rect.current);
       this.#measure = sizeValue("Width × Depth", pair, this.#host.unit(), "", "typed");
       this.#host.setHint("");
-      if (commit) this.#commitRect(p!);
+      if (commit) this.#commitRect(rect);
       return;
     }
     this.#host.setHint(

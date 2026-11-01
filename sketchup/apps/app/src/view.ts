@@ -997,8 +997,10 @@ export class View {
 
   /** Ids a selection gesture may pick: everything drawn, minus locked objects. */
   selectableIds(): string[] {
-    return drawnSolids(this.#session.document)
-      .filter((s) => !s.meta.hidden && !s.meta.locked)
+    const doc = this.#session.document;
+    return drawnSolids(doc)
+      .map((id) => doc.solids.get(id))
+      .filter((s): s is NonNullable<typeof s> => s !== undefined && !s.meta.hidden && !s.meta.locked)
       .map((s) => s.id);
   }
 

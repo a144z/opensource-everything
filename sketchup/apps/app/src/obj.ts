@@ -16,10 +16,19 @@
  * almost always planar and convex (exporters emit triangles and quads), and
  * refusing every n-gon would reject most real files; a fan is exact for convex
  * faces and visible-but-repairable for concave ones.
+ *
+ * `indices` is always a whole number of triangles, and every index names a
+ * vertex that exists: the engine refuses a mesh recipe whose index count is not
+ * a multiple of three, so a file that repeats a corner (`f 1 2 2 3`, or a
+ * polygon closed by naming its first corner again) must not reach it. A
+ * repeated corner carries no area, so dropping it loses nothing.
  */
 
+/** One mesh in the shape the engine's `mesh` recipe takes: flat, whole triangles. */
 export interface ObjMesh {
+  /** Flat xyz triples, in millimetres after the caller scales them. */
   readonly positions: number[];
+  /** Triangle indices into `positions / 3`; length is a multiple of three. */
   readonly indices: number[];
   readonly name: string;
   /** The unit the file declared, or null when it declared none. */
@@ -93,8 +102,15 @@ export function parseObj(text: string): ObjMesh {
         const corners = rest.split(/\s+/).filter((t) => t !== "");
         if (corners.length < 3) throw new ObjError("a face needs at least three corners", i + 1);
         const resolved = corners.map((token) => resolveIndex(token.split("/")[0] ?? "", positions.length / 3, i + 1));
+        // Fan from the first corner. A fan triangle whose corner repeats another
+        // is a degenerate edge of the polygon (or a doubled corner in the file),
+        // not a face: it is skipped so `indices` stays a whole run of triangles.
         for (let k = 1; k + 1 < resolved.length; k++) {
-          indices.push(resolved[0]!, resolved[k]!, resolved[k + 1]!);
+          const a = resolved[0]!;
+          const b = resolved[k]!;
+          const c = resolved[k + 1]!;
+          if (a === b || b === c || a === c) continue;
+          indices.push(a, b, c);
         }
         break;
       }

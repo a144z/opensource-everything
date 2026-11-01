@@ -21,6 +21,18 @@ describe("parseObj", () => {
     expect(mesh.indices).toEqual([0, 1, 2, 0, 2, 3]);
   });
 
+  it("never emits a partial or degenerate triangle, because the engine refuses one", () => {
+    // A polygon closed by naming its first corner again (`f 1 2 3 1`) and a
+    // doubled corner (`f 1 2 2 3`) both fan into slivers with no area.
+    const closed = ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 3 1"].join("\n");
+    const doubled = ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 2 3"].join("\n");
+    for (const text of [closed, doubled]) {
+      const indices = parseObj(text).indices;
+      expect(indices.length % 3).toBe(0);
+      expect(indices).toEqual([0, 1, 2]);
+    }
+  });
+
   it("reads every index spelling: v, v/vt, v//vn, v/vt/vn", () => {
     const text = [
       "v 0 0 0",

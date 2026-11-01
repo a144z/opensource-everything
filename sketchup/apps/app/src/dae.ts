@@ -226,7 +226,9 @@ function appendTransformed(t: Triangles, m: Mat4, positions: number[], indices: 
 
 /** Elements whose local name is `name`, from anywhere under `scope`. */
 function byName(scope: ParentNode, name: string): Element[] {
-  return Array.from(scope.getElementsByTagNameNS("*", name));
+  // `ParentNode` (a Document or Element) does not declare the namespace query;
+  // both concrete types do, and every caller passes one of those.
+  return Array.from((scope as Document | Element).getElementsByTagNameNS("*", name));
 }
 
 function splitFloats(text: string): number[] {

@@ -63,16 +63,19 @@ describe("point in polygon", () => {
   });
 
   it("uses even-odd for a self-intersecting scribble", () => {
-    // A bow tie: the two lobes count, the crossing point is not reliably in.
+    // The path crosses itself at (50, 50), which cuts the loop into a left lobe
+    // and a right lobe. Even-odd makes both inside; (50, 25) is in the notch
+    // between the two arms, not in a lobe, so it stays out.
     const bow = [
       [0, 0],
       [100, 100],
       [100, 0],
       [0, 100],
     ] as const;
-    expect(pointInPolygon([20, 20], bow)).toBe(true);
-    expect(pointInPolygon([80, 80], bow)).toBe(true);
-    expect(pointInPolygon([80, 20], bow)).toBe(false);
+    expect(pointInPolygon([20, 50], bow)).toBe(true);
+    expect(pointInPolygon([80, 20], bow)).toBe(true);
+    expect(pointInPolygon([50, 25], bow)).toBe(false);
+    expect(pointInPolygon([110, 50], bow)).toBe(false);
   });
 });
 

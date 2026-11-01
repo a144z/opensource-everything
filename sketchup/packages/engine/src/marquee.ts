@@ -71,19 +71,29 @@ export function isDegenerate(box: ScreenBox, minPixels = 3): boolean {
  * even-odd rule decides inside, which is what a person expects from a scribble.
  */
 export function pointInPolygon(point: readonly [number, number], path: readonly (readonly [number, number])[]): boolean {
-  let inside = false;
+  // Even-odd ray cast to +x, the same rule a rectangle drag uses: count the
+  // edges the ray crosses and a point is inside when the count is odd.
+  //
+  // The edge test is half-open on y, `(a.y > y) !== (b.y > y)`, which counts a
+  // vertex shared by two edges exactly once and never divides by a zero rise, so
+  // a ray through a corner is not ambiguous and needs no nudge: nudging a corner
+  // moves the crossing off the ray by less than a round-off and can land the
+  // point on the wrong side of its own edge, which is how a lobe reads outside.
+  const px = point[0];
+  const py = point[1];
+  let crossings = 0;
   for (let i = 0, j = path.length - 1; i < path.length; j = i++) {
-    const a = path[i]!;
-    const b = path[j]!;
-    // A horizontal ray cast to +x; count the edges it crosses.
-    const straddles = a[1] > point[1] !== b[1] > point[1];
-    if (straddles) {
-      const x = ((b[0] - a[0]) * (point[1] - a[1])) / (b[1] - a[1]) + a[0];
-      if (x > point[0]) inside = !inside;
+    const a = path[j]!;
+    const b = path[i]!;
+    if (a[1] > py !== b[1] > py) {
+      const x = ((b[0] - a[0]) * (py - a[1])) / (b[1] - a[1]) + a[0];
+      if (x > px) crossings++;
     }
   }
-  return inside;
+  return crossings % 2 === 1;
 }
+
+
 
 /** Which rule a lasso path means: the same left-to-right convention as the drag. */
 export function lassoDirection(path: readonly (readonly [number, number])[]): DragDirection {

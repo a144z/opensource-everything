@@ -1,7 +1,7 @@
 import type { Vec2, Vec3 } from "@apexus/geometry";
 import { patchOf, type Command } from "./command.js";
 import { identity4, withRotation, withScale, withTranslation } from "./math.js";
-import { assertFaceRecipe, assertSolidRecipe, requireSolid, transformPatch } from "./seams.js";
+import { assertFaceRecipe, assertSolidRecipe, newMeta, requireSolid, transformPatch } from "./seams.js";
 import type { Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
 
 /**

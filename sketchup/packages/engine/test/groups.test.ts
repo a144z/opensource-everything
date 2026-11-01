@@ -10,6 +10,7 @@ import {
   moveBetween,
   parentsOf,
   rootsOf,
+  SCHEMA_VERSION,
   serializeJson,
   setMatrix,
   translateSolids,
@@ -256,7 +257,7 @@ describe("ownership", () => {
   it("a schema 3 file still opens and gains no groups", () => {
     const { s, a, b } = twoBoxes();
     const raw = JSON.parse(serializeJson(s.document));
-    expect(raw.schemaVersion).toBe(4);
+    expect(raw.schemaVersion).toBe(SCHEMA_VERSION);
     raw.schemaVersion = 3;
     const opened = deserializeJson(JSON.stringify(raw));
     expect(opened.solids.size).toBe(2);

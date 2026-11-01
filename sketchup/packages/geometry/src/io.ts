@@ -220,20 +220,47 @@ export function toDxf(polylines: readonly { name: string; points: readonly Vec2[
 }
 
 /**
+ * VERTEX `70` bit 16: a spline or curve-fit frame control point rather than a
+ * real corner. Keeping one would put a Bezier handle in the ring as if the user
+ * had drawn a kink there.
+ */
+const VERTEX_SPLINE_FRAME = 16;
+
+/**
  * Parse LWPOLYLINE and POLYLINE entities into closed rings.
  *
  * Only *closed* polylines are returned, and the `70` group code is what says so.
  * An open polyline is a fence or a wall run, not a face: closing it would turn a
  * drawing the user made into a face they never asked for, so it is skipped and
  * `readImport` reports how many were skipped rather than pretending they arrived.
+ *
+ * The two spellings of "polyline" are kept apart on purpose. An LWPOLYLINE carries
+ * its vertices inline; a POLYLINE is a run of separate VERTEX entities ended by
+ * SEQEND, so its points are collected across several entities and the run is only
+ * finished when SEQEND arrives (or the file ends). R12 writers use POLYLINE for
+ * everything, so reading only the inline form silently imports nothing from them.
  */
 export function fromDxf(text: string): Vec2[][] {
   const lines = text.split(/\r?\n/);
   const rings: Vec2[][] = [];
-  /** The ring being filled, plus whether its entity said it is closed. */
-  let current: { points: Vec2[]; closed: boolean } | null = null;
+  /**
+   * The ring being filled, whether its entity said it is closed, and whether the
+   * VERTEX currently being read is a spline frame point to drop.
+   */
+  let current: { points: Vec2[]; closed: boolean; splineVertex: boolean } | null = null;
+  /** True while inside a POLYLINE/VERTEX run, where vertices are their own entities. */
+  let inPolyline = false;
+  /** True while the entity being read is a VERTEX of that run. */
+  let inVertex = false;
   let inEntities = false;
   let pendingX: number | null = null;
+  const finish = (): void => {
+    if (current && current.closed && current.points.length >= 3) rings.push(current.points);
+    current = null;
+    inPolyline = false;
+    inVertex = false;
+    pendingX = null;
+  };
   for (let i = 0; i + 1 < lines.length; i += 2) {
     const code = lines[i]!.trim();
     const value = lines[i + 1]!.trim();
@@ -241,29 +268,45 @@ export function fromDxf(text: string): Vec2[][] {
     else if (code === "0" && value === "ENDSEC") inEntities = false;
     if (!inEntities) continue;
     if (code === "0") {
-      // A new entity ends whatever ring was open.
-      if (current) {
-        if (current.closed && current.points.length >= 3) rings.push(current.points);
-        current = null;
-      }
       pendingX = null;
-      if (value === "LWPOLYLINE" || value === "POLYLINE") {
-        current = { points: [], closed: false };
+      if (inPolyline && value === "VERTEX") {
+        inVertex = true;
+        current = current ?? { points: [], closed: false, splineVertex: false };
+        current.splineVertex = false;
+        continue;
+      }
+      inVertex = false;
+      if (inPolyline && value === "SEQEND") {
+        finish();
+        continue;
+      }
+      // Any other entity ends whatever ring was open.
+      finish();
+      if (value === "LWPOLYLINE") {
+        current = { points: [], closed: false, splineVertex: false };
+      } else if (value === "POLYLINE") {
+        current = { points: [], closed: false, splineVertex: false };
+        inPolyline = true;
       }
       continue;
     }
     if (!current) continue;
-    if (code === "70") {
+    // Inside a run, `70` after a VERTEX entity is the vertex's own flags. The
+    // POLYLINE's `70` arrives before its first VERTEX, so `inVertex` is what
+    // separates the two; treating both as a VERTEX flag dropped every corner.
+    if (inVertex && code === "70") {
+      current.splineVertex = (Number.parseInt(value, 10) & VERTEX_SPLINE_FRAME) !== 0;
+    } else if (code === "70") {
       // Bit 1 is the closed flag; the other bits (spline-fit, 3D) do not matter
       // because only the plan view is read.
       current.closed = (Number.parseInt(value, 10) & 1) === 1;
     } else if (code === "10") {
       pendingX = Number(value);
     } else if (code === "20" && pendingX !== null) {
-      current.points.push([pendingX, Number(value)]);
+      if (!current.splineVertex) current.points.push([pendingX, Number(value)]);
       pendingX = null;
     }
   }
-  if (current && current.closed && current.points.length >= 3) rings.push(current.points);
+  finish();
   return rings;
 }

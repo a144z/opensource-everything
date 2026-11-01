@@ -1,0 +1,206 @@
+{
+  "project": "FitCheck (SketchUp-class) - opensource-everything/sketchup",
+  "created_at": "2026-11-01",
+  "note": "Writable field: passes. Do not edit acceptance, description or id to make a check pass - report instead.",
+  "features": [
+    {
+      "id": "H-01",
+      "title": "Build-loop harness scripts",
+      "description": "harness.ps1 with check (static) / verify (typecheck, vitest, smoke, background, logs) / report (one line per check) / tick / untick / next. Logs under .harness/logs, git-ignored.",
+      "priority": 1,
+      "depends_on": [],
+      "acceptance": [
+        "harness.ps1 check runs every .py checker found in .harness/checks and prints PASS or ERROR per check",
+        "harness.ps1 verify runs typecheck, then vitest, then smoke, writing one summary line per step",
+        "harness.ps1 report prints PASS/ERROR per step from the summaries only",
+        "harness.ps1 tick/untick change only the passes field of feature_list.json",
+        "harness.ps1 next prints the highest-priority unpassed feature whose deps pass"
+      ],
+      "passes": true
+    },
+    {
+      "id": "L1-14",
+      "title": "Zero-thickness face recipe (schema 6)",
+      "description": "Face is its own recipe kind (points + plane + matrix), meshed by packages/geometry/src/face.ts, zero volume, counted by area, push/pull converts it to a loop of the same ring, DXF import emits faces, picking hits from the visible side.",
+      "priority": 2,
+      "depends_on": [],
+      "acceptance": [
+        "rectangle, circle, polygon, arc, rotated rectangle create a face with zero volume",
+        "push/pull on a face produces a loop extrusion of the same ring and plane",
+        "outliner shows Face with area in cm2, never a volume of 0",
+        "addFace refuses <3 points, zero area, zero-length normal",
+        "a 5-file loads and reports version 6",
+        "packages/engine/test/face.test.ts and packages/geometry/test/face.test.ts pass"
+      ],
+      "passes": true
+    },
+    {
+      "id": "V-01",
+      "title": "First real gate run",
+      "description": "Typecheck, the whole vitest suite and the smoke script run once in the background; docs/13-test-plan.md Results filled from real output; every failure either fixed in the same or next cycle or recorded with a reason.",
+      "priority": 3,
+      "depends_on": ["H-01"],
+      "acceptance": [
+        "harness.ps1 report shows PASS for typecheck, tests and smoke",
+        "docs/13-test-plan.md Results table holds real case rows, no placeholder text",
+        "every earlier-written-but-never-run suite has run at least once"
+      ],
+      "passes": true
+    },
+    {
+      "id": "L1-5",
+      "title": "Line tool",
+      "description": "Chains clicks into edges; closing on the start vertex creates a face; typed length moves the next point along the current direction.",
+      "priority": 4,
+      "depends_on": ["L1-14"],
+      "acceptance": [
+        "each click adds an edge preview and snaps to endpoints like other tools",
+        "clicking the start vertex (or Enter) closes the ring and creates a face",
+        "typed length places the next point at exactly that distance in the current direction",
+        "Escape cancels without leaving a partial object",
+        "undo removes the whole chain in one step"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-6",
+      "title": "Inference wiring + glyphs",
+      "description": "inference.ts already computes endpoint/midpoint/axis locks; wire it to the pointer so every tool snaps, and draw the glyphs (endpoint square, midpoint diamond, on-edge, axis colour).",
+      "priority": 5,
+      "depends_on": ["L1-5"],
+      "acceptance": [
+        "pointer snaps to endpoints and midpoints of existing edges within a screen-space tolerance",
+        "axis lock lines appear in red/green/blue depending on the locked axis",
+        "Shift still forces the square constraint on rectangle and line",
+        "a status hint names the active inference"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-7",
+      "title": "Offset tool",
+      "description": "2D inset/outset of a polygon ring by a typed distance, producing a new face or ring.",
+      "priority": 6,
+      "depends_on": ["L1-14"],
+      "acceptance": [
+        "offset of a convex ring by d has area differing from the original by the expected amount",
+        "offset that would self-intersect is refused with a message",
+        "negative (inward) and positive (outward) both work",
+        "result is one undoable step"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-8",
+      "title": "Follow-me",
+      "description": "Sweep a profile along a path (edges chain or a clicked path) to build a solid.",
+      "priority": 7,
+      "depends_on": ["L1-14", "L1-5"],
+      "acceptance": [
+        "sweeping a rectangle along a straight path equals the equivalent extrusion",
+        "a path perpendicular to the profile is accepted, a path parallel to it is refused",
+        "result is watertight per inspectMesh",
+        "one undo step"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-10",
+      "title": "Dimension tool",
+      "description": "Linear dimension between two points, placed with a third click, text editable, drawn in the annotations layer, saved in the file.",
+      "priority": 8,
+      "depends_on": ["L1-6"],
+      "acceptance": [
+        "dimension length equals the distance between its endpoints in the chosen unit",
+        "editing the text persists through save/open",
+        "dragging a dimension updates the drawn offset, not the measured value unless endpoints move",
+        "one undo step per dimension"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-11",
+      "title": "Tape measure",
+      "description": "Shows live length while dragging and a typed length creates a guide line (not geometry).",
+      "priority": 9,
+      "depends_on": ["L1-6"],
+      "acceptance": [
+        "live length updates while dragging",
+        "typing a length then Enter creates a guide line of exactly that length",
+        "guide lines are visible, selectable for delete, and never counted in quantity",
+        "saved in the file"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-9",
+      "title": "Sticky geometry + coplanar weld",
+      "description": "Chamfer/fillet edges and weld coplanar faces after booleans so edits produce clean solids.",
+      "priority": 10,
+      "depends_on": ["V-01"],
+      "acceptance": [
+        "boolean of two flush boxes yields a solid whose mesh has no internal faces",
+        "chamfer on a chosen edge changes the volume by the expected amount",
+        "fillet radius larger than the adjacent face is refused",
+        "one undo step"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L3-5",
+      "title": "Clearance check",
+      "description": "Report pairs of objects closer than a threshold distance.",
+      "priority": 11,
+      "depends_on": ["V-01"],
+      "acceptance": [
+        "two objects 50 mm apart with a 100 mm clearance rule are reported",
+        "two objects 150 mm apart are not reported",
+        "touching objects report 0, not a negative distance",
+        "report lists both ids and the measured gap"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L3-6",
+      "title": "BOM and cut list",
+      "description": "Per-object quantity: volume, area, longest edge, material; grouped by tag or definition, exportable as CSV.",
+      "priority": 12,
+      "depends_on": ["L1-14", "V-01"],
+      "acceptance": [
+        "a face contributes area, never a volume",
+        "instances of one definition are grouped with a count",
+        "CSV export round-trips numbers with the file's unit",
+        "grouped rows sum to the whole-model total"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L3-7",
+      "title": "Scaled PDF sheet",
+      "description": "Export the current view as a page at a chosen scale (1:50 etc.) with a title block.",
+      "priority": 13,
+      "depends_on": ["L1-10"],
+      "acceptance": [
+        "a 1000 mm wall prints 20 mm long at 1:50",
+        "the chosen scale is printed in the title block",
+        "changing scale does not change model units",
+        "export completes without a browser download prompt in the desktop build"
+      ],
+      "passes": false
+    },
+    {
+      "id": "L1-15",
+      "title": "Soften/smooth edges (Ctrl)",
+      "description": "Ctrl during an operation softens the affected edges; softened edges are hidden in Shaded and drawn dotted in Edges Only.",
+      "priority": 14,
+      "depends_on": ["L1-9"],
+      "acceptance": [
+        "softened edge is not drawn as a hard line in Shaded",
+        "softened edges survive save/open",
+        "Ctrl is a modifier like Shift and does not break typing",
+        "softening is one undo step"
+      ],
+      "passes": false
+    }
+  ]
+}

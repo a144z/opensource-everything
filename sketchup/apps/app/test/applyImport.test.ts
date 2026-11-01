@@ -29,6 +29,26 @@ function requireKernel(): boolean {
 
 const OBJ_CM = ["# units: cm", "v 0 0 0", "v 2 0 0", "v 2 2 0", "v 0 2 0", "f 1 2 3 4"].join("\n");
 
+/**
+ * A closed tetrahedron, 20 mm on its legs, in centimetre units.
+ *
+ * A single `f` face is a zero-thickness surface, and the engine rightly refuses
+ * to call that a solid (`assertSolidRecipe` asks for volume). A real OBJ export
+ * from a modeller encloses something, so the fixture must too: the cases below
+ * ask about units, naming and one undo step, not about open surfaces.
+ */
+const OBJ_TETRA_CM = [
+  "# units: cm",
+  "v 0 0 0",
+  "v 2 0 0",
+  "v 0 2 0",
+  "v 0 0 2",
+  "f 1 3 2",
+  "f 1 2 4",
+  "f 2 3 4",
+  "f 3 1 4",
+].join("\n");
+
 const DXF_SQUARE = [
   "0", "SECTION", "2", "ENTITIES",
   "0", "LWPOLYLINE", "90", "4", "70", "1",
@@ -66,7 +86,7 @@ describe("applyImport: an OBJ mesh", () => {
   it("adds exactly one solid, selected by id, in file order", () => {
     if (!requireKernel()) return;
     const session: SessionType = new Session();
-    const applied = applyImport(session, readImport("plate.obj", OBJ_CM));
+    const applied = applyImport(session, readImport("plate.obj", OBJ_TETRA_CM));
     expect(applied.ids).toHaveLength(1);
     expect(session.document.solids.has(applied.ids[0]!)).toBe(true);
     expect(session.document.solids.size).toBe(1);
@@ -75,7 +95,7 @@ describe("applyImport: an OBJ mesh", () => {
   it("applies the file's unit once: a 2 cm edge is 20 mm in the document", () => {
     if (!requireKernel()) return;
     const session: SessionType = new Session();
-    const applied = applyImport(session, readImport("plate.obj", OBJ_CM));
+    const applied = applyImport(session, readImport("plate.obj", OBJ_TETRA_CM));
     const box = session.boundsOf(applied.ids[0]!);
     expect(box.max[0] - box.min[0]).toBeCloseTo(20, 6);
     expect(box.max[1] - box.min[1]).toBeCloseTo(20, 6);
@@ -84,14 +104,14 @@ describe("applyImport: an OBJ mesh", () => {
   it("names the solid after the file's object name", () => {
     if (!requireKernel()) return;
     const session: SessionType = new Session();
-    const applied = applyImport(session, readImport("plate.obj", `o jig\n${OBJ_CM}`));
+    const applied = applyImport(session, readImport("plate.obj", `o jig\n${OBJ_TETRA_CM}`));
     expect(session.document.solids.get(applied.ids[0]!)!.meta.name).toBe("jig");
   });
 
   it("says why the size is what it is in the message", () => {
     if (!requireKernel()) return;
     const session: SessionType = new Session();
-    const applied = applyImport(session, readImport("plate.obj", OBJ_CM));
+    const applied = applyImport(session, readImport("plate.obj", OBJ_TETRA_CM));
     expect(applied.message).toMatch(/cm/);
   });
 
@@ -99,7 +119,7 @@ describe("applyImport: an OBJ mesh", () => {
     if (!requireKernel()) return;
     const session: SessionType = new Session();
     const before = session.hash();
-    applyImport(session, readImport("plate.obj", OBJ_CM));
+    applyImport(session, readImport("plate.obj", OBJ_TETRA_CM));
     session.undo();
     expect(session.hash()).toBe(before);
     expect(session.document.solids.size).toBe(0);

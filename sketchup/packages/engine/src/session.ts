@@ -349,12 +349,21 @@ export class Session {
     return this.#fit;
   }
 
-  /** Deterministic content hash: proves undo and file round-trips. */
+  /**
+   * Deterministic content hash: proves undo and file round-trips.
+   *
+   * Geometry alone is not enough to prove a round trip. Hiding a tag or an object
+   * changes nothing about the triangles but is exactly what a user would notice
+   * lost, and it is what makes "hide, undo" verifiable. The meta fields that
+   * change what is on screen are folded in for that reason, in a fixed order.
+   */
   hash(): string {
     const parts: string[] = [];
     for (const id of [...this.#doc.solids.keys()].sort()) {
       const geo = this.#analyse(id);
-      parts.push(`${id}:${geo.hash}:${geo.volume.toFixed(6)}:${geo.closed ? 1 : 0}`);
+      const meta = this.#doc.solids.get(id)!.meta;
+      const look = `${meta.hidden ? 1 : 0}${meta.locked ? 1 : 0}|${meta.tag}|${meta.opacity}|${meta.color}|${meta.name}`;
+      parts.push(`${id}:${geo.hash}:${geo.volume.toFixed(6)}:${geo.closed ? 1 : 0}:${look}`);
     }
     parts.push(`env:${JSON.stringify(this.#doc.envelope)}`);
     let h = 0x811c9dc5;

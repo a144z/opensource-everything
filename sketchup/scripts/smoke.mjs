@@ -19,6 +19,51 @@ const CHROME =
   process.env["CHROME_BIN"] ?? "C:/Program Files/Google/Chrome/Application/chrome.exe";
 const PORT = 9333;
 
+/**
+ * A server to test against, started here unless one already answers.
+ *
+ * The gate has to work from a cold checkout: `.\harness.ps1 verify` run by a
+ * person or by the loop has no dev server running, and a smoke test that assumes
+ * one fails with a null element three checks in. A URL passed on the command
+ * line is taken as given.
+ */
+
+async function alive(url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureServer(url) {
+  if (await alive(url)) return null;
+  // Run Vite's JS entry with `node` directly: on Windows `npx` is a `.cmd` shim
+  // that needs a shell, and a shell-spawned tree cannot be killed cleanly, so the
+  // port would stay held between runs.
+  const vite = path.resolve(import.meta.dirname, "..", "node_modules", "vite", "bin", "vite.js");
+  const child = spawn(process.execPath, [vite, "--port", "5198", "--strictPort", "--host", "127.0.0.1"], {
+    cwd: path.resolve(import.meta.dirname, "..", "apps", "app"),
+    stdio: "ignore",
+  });
+  for (let i = 0; i < 120; i++) {
+    if (await alive(url)) return child;
+    await sleep(250);
+  }
+  child.kill();
+  throw new Error(`no dev server at ${url}`);
+}
+
+const problems = [];
+const logs = [];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Started only once sleep exists: top-level await runs before later consts.
+const server = process.argv[2] ? null : await ensureServer(URL_UNDER_TEST);
+
+// Chrome last: it navigates on start, so the server must already answer.
 const profile = mkdtempSync(path.join(tmpdir(), "fitcheck-smoke-"));
 const chrome = spawn(
   CHROME,
@@ -36,11 +81,6 @@ const chrome = spawn(
   ],
   { stdio: "ignore" },
 );
-
-const problems = [];
-const logs = [];
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function target() {
   for (let i = 0; i < 60; i++) {
@@ -457,8 +497,12 @@ try {
   // The expression that threw matters: a bare "null.textContent" says nothing
   // about which probe failed, and guessing costs more than printing it.
   if (err.stack) console.error(err.stack);
+  // The console is the only evidence of *why* a boot probe found nothing: a
+  // page that loaded no script says nothing at all, one that threw says it here.
+  if (logs.length) console.error(`--- console (last 40) ---\n` + logs.slice(-40).join("\n"));
 } finally {
   chrome.kill();
+  server?.kill();
   try {
     rmSync(profile, { recursive: true, force: true });
   } catch {

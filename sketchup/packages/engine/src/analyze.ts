@@ -18,7 +18,7 @@ import {
   type Vec3,
 } from "@apexus/geometry";
 import { applyMatrix4, identity4, multiply4 } from "./math.js";
-import type { SolidRecipe } from "./types.js";
+import type { SolidId, SolidRecipe } from "./types.js";
 
 export const EMPTY_BOUNDS: Aabb = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
 
@@ -99,7 +99,20 @@ export function analyseMesh(mesh: MeshData): SolidGeometry {
   };
 }
 
-export function boundsOf(mesh: MeshData): Aabb {
+export function boundsOf(mesh: MeshData): Aabb;
+export function boundsOf(session: { boundsOf(id: SolidId): Aabb }, id: SolidId): Aabb;
+/**
+ * A solid's world-space bounds.
+ *
+ * Two call shapes because two audiences ask the same question: the analysis
+ * helpers have a mesh in hand, and every tool and test has a session and an id.
+ * Answering the second one here (rather than making each caller reach through
+ * `session.boundsOf(id)` into a mesh) keeps one definition of "the bounds of a
+ * solid", and it reads a missing mesh as empty bounds instead of throwing.
+ */
+export function boundsOf(subject: MeshData | { boundsOf(id: SolidId): Aabb }, id?: SolidId): Aabb {
+  if (id !== undefined) return (subject as { boundsOf(id: SolidId): Aabb }).boundsOf(id);
+  const mesh = subject as MeshData;
   const pts: Vec3[] = [];
   for (let i = 0; i < mesh.positions.length; i += 3) {
     pts.push([mesh.positions[i]!, mesh.positions[i + 1]!, mesh.positions[i + 2]!]);

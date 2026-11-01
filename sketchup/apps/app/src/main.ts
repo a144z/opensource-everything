@@ -1452,12 +1452,14 @@ const viewRoot = $("viewport").parentElement ?? document.body;
 for (const type of ["dragenter", "dragover"]) {
   viewRoot.addEventListener(type, (e) => {
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    // DOM events are untyped; a drag event carries its payload here.
+    const drag = e as DragEvent;
+    if (drag.dataTransfer) drag.dataTransfer.dropEffect = "copy";
   });
 }
 viewRoot.addEventListener("drop", (e) => {
   e.preventDefault();
-  const file = e.dataTransfer?.files?.[0];
+  const file = (e as DragEvent).dataTransfer?.files?.[0];
   if (file) importFile(file);
 });
 
@@ -1572,8 +1574,10 @@ function renderKeysTable(): void {
   const table = $("keys-table");
   const rows: string[] = [];
   for (const [key, id] of Object.entries(keys)) {
-    if (id === undefined) continue;
-    rows.push(`${key} ${commandLabels[id].toLowerCase()}`);
+    // Overrides are stored as plain strings, so an id no longer in the table is
+    // possible after a command is removed; that stale binding is simply skipped.
+    if (id === undefined || !Object.prototype.hasOwnProperty.call(commandLabels, id)) continue;
+    rows.push(`${key} ${commandLabels[id as CommandId].toLowerCase()}`);
   }
   rows.sort((a, b) => a.localeCompare(b));
   const line = document.createElement("p");

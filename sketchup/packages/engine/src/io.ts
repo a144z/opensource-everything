@@ -313,7 +313,10 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
     }
     case "mesh": {
       if (!Array.isArray(raw.positions) || !Array.isArray(raw.indices)) throw new Error(`solid ${id} mesh is incomplete`);
-      if (raw.positions.length % 9 !== 0 || raw.indices.length % 3 !== 0) throw new Error(`solid ${id} mesh is not whole triangles`);
+      // Positions are a flat x,y,z run: one triple per corner, so the length is a
+      // multiple of 3 (the schema carries no per-face normal arrays). Indices are
+      // a flat run of corner indices, one triple per triangle.
+      if (raw.positions.length % 3 !== 0 || raw.indices.length % 3 !== 0) throw new Error(`solid ${id} mesh is not whole triangles`);
       if (![...raw.positions, ...raw.indices].every((n) => typeof n === "number" && Number.isFinite(n))) {
         throw new Error(`solid ${id} mesh has non-finite numbers`);
       }

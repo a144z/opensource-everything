@@ -25,6 +25,7 @@ import {
   translateSolid,
   translateSolids,
   withScaleFromDragged,
+  decompose,
   type SolidId,
   type SolidRecipe,
 } from "../src/index.js";
@@ -265,11 +266,15 @@ describe("scale gizmo commit (withScaleFromDragged)", () => {
     // The gizmo reports a rotation a hair off, plus a translation from the scale.
     const dragged = [2 * (c + 1e-9), 2 * (sn - 1e-9), 0, 0, -2 * (sn + 1e-9), 2 * (c - 1e-9), 0, 0, 0, 0, 2, 0, 7, 17, 0, 1];
     const kept = withScaleFromDragged(start, dragged);
-    const basis = [kept[0]!, kept[1]!, kept[4]!, kept[5]!];
+    // The matrix stores rotation × scale, so the angle is what `decompose`
+    // recovers: comparing matrix entries against `cos 30` would only pass for an
+    // unscaled object.
+    const basis = decompose(kept).rotation;
     expect(basis[0]).toBeCloseTo(c, 12);
     expect(basis[1]).toBeCloseTo(sn, 12);
-    expect(basis[2]).toBeCloseTo(-sn, 12);
-    expect(basis[3]).toBeCloseTo(c, 12);
+    expect(basis[3]).toBeCloseTo(-sn, 12);
+    expect(basis[4]).toBeCloseTo(c, 12);
+    expect(decompose(kept).scale[0]).toBeCloseTo(2, 6);
     expect([kept[12], kept[13]]).toEqual([10, 20]);
   });
 

@@ -43,11 +43,15 @@ export function applyImport(session: Session, outcome: ImportOutcome): AppliedIm
   // volume — and the engine refuses a loop whose distance is not positive.
   // Rings are wound consistently, so two imports of the same drawing do not
   // differ by which side faces out.
-  const ids: SolidId[] = [];
-  for (const ring of outcome.loops) {
-    const patch = session.execute(addFace(counterClockwise(ring), GROUND_PLANE, { name: `${outcome.name} outline` }));
-    ids.push(...patch.forward.keys());
-  }
+  //
+  // The rings go in as one `batch`, so the whole file is one undo step: the
+  // user imported a drawing, not a pile of rings, and Ctrl+Z must take back
+  // the import rather than the last ring of it.
+  const commands = outcome.loops.map((ring) =>
+    addFace(counterClockwise(ring), GROUND_PLANE, { name: `${outcome.name} outline` }),
+  );
+  const patch = session.batch(commands);
+  const ids: SolidId[] = [...patch.forward.keys()];
   if (ids.length === 0) {
     throw new Error(`${outcome.name}: no outline had three usable points, so nothing was added.`);
   }

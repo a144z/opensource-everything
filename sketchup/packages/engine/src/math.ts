@@ -48,51 +48,42 @@ export function scale4(s: number | Vec3): number[] {
 }
 
 export function rotationX4(deg: number): number[] {
-  const r = (deg * Math.PI) / 180;
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1];
+  return rotationAbout4([1, 0, 0], deg);
 }
 
 export function rotationY4(deg: number): number[] {
-  const r = (deg * Math.PI) / 180;
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1];
+  return rotationAbout4([0, 1, 0], deg);
 }
 
 export function rotationZ4(deg: number): number[] {
-  const r = (deg * Math.PI) / 180;
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  return rotationAbout4([0, 0, 1], deg);
 }
 
-/** Rotation of `deg` about an arbitrary unit axis, through `pivot`. */
+/**
+ * Rotation of `deg` about an arbitrary unit axis, through `pivot`.
+ *
+ * Column-major, active rotation: with column vectors, entry `[c, r]` is
+ * `m[c * 4 + r]`, so this is Rodrigues' matrix written column by column. A +90
+ * turn about x takes y to z (column 1 becomes `(0, 0, 1)`), matching
+ * `rotationX4`; a +90 turn about z takes x to y, matching `rotationZ4`.
+ */
 export function rotationAbout4(axis: Vec3, deg: number, pivot: Vec3 = [0, 0, 0]): number[] {
   const [x, y, z] = normalize3(axis);
   const r = (deg * Math.PI) / 180;
   const c = Math.cos(r);
   const s = Math.sin(r);
   const t = 1 - c;
-  return [
-    t * x * x + c,
-    t * x * y + s * z,
-    t * x * z - s * y,
-    0,
-    t * x * y - s * z,
-    t * y * y + c,
-    t * y * z + s * x,
-    0,
-    t * x * z + s * y,
-    t * y * z - s * x,
-    t * z * z + c,
-    0,
-    pivot[0] - (t * x * x + c) * pivot[0] - (t * x * y - s * z) * pivot[1] - (t * x * z + s * y) * pivot[2],
-    pivot[1] - (t * x * y + s * z) * pivot[0] - (t * y * y + c) * pivot[1] - (t * y * z - s * x) * pivot[2],
-    pivot[2] - (t * x * z - s * y) * pivot[0] - (t * y * z + s * x) * pivot[1] - (t * z * z + c) * pivot[2],
-    1,
+  // Columns of the 3x3 block, in the row order x, y, z.
+  const c0: Vec3 = [t * x * x + c, t * x * y + s * z, t * x * z - s * y];
+  const c1: Vec3 = [t * x * y - s * z, t * y * y + c, t * y * z + s * x];
+  const c2: Vec3 = [t * x * z + s * y, t * y * z - s * x, t * z * z + c];
+  // Rotation first, then pivot: t = p - R p, so a point on the pivot does not move.
+  const p0: Vec3 = [
+    pivot[0] - (c0[0] * pivot[0] + c1[0] * pivot[1] + c2[0] * pivot[2]),
+    pivot[1] - (c0[1] * pivot[0] + c1[1] * pivot[1] + c2[1] * pivot[2]),
+    pivot[2] - (c0[2] * pivot[0] + c1[2] * pivot[1] + c2[2] * pivot[2]),
   ];
+  return [c0[0], c0[1], c0[2], 0, c1[0], c1[1], c1[2], 0, c2[0], c2[1], c2[2], 0, p0[0], p0[1], p0[2], 1];
 }
 
 /** Column-major 4x4 multiply: returns m  n. */
@@ -108,6 +99,10 @@ export function multiply4(m: readonly number[], n: readonly number[]): number[] 
   return out;
 }
 
+/**
+ * A matrix maps column vectors (`applyMatrix4` reads `m[4]` for y), so a
+ * rotation must be built one way round to match; see `rotationAbout4`.
+ */
 export function applyPoint4(m: readonly number[], p: Vec3): Vec3 {
   return [
     m[0]! * p[0] + m[4]! * p[1] + m[8]! * p[2] + m[12]!,
@@ -251,23 +246,29 @@ export function compose(trs: Trs): number[] {
 }
 
 /** Rotate ase by deg about a world axis through pivot, preserving its TRS split. */
+/** Rotate `base` by `deg` about a world axis through `pivot`, preserving its TRS split. */
 export function withRotation(base: readonly number[], axis: Vec3, deg: number, pivot: Vec3 = [0, 0, 0]): number[] {
   const trs = decompose(base);
-  const rot = rotationAbout4(axis, deg).slice(0, 12);
-  // rotationAbout4 already puts the pivot term in the translation column; use
-  // only its 3x3 block here and rotate the TRS translation about the pivot.
-  const basis = [rot[0]!, rot[1]!, rot[2]!, rot[4]!, rot[5]!, rot[6]!, rot[8]!, rot[9]!, rot[10]!];
+  const { rotation: m } = decompose(rotationAbout4(axis, deg));
+  // Apply the turn in world space: `world * base`, both pure rotations, so a
+  // turn about the origin of an object whose own rotation is R leaves R·M, which
+  // is what SketchUp reports and what a second turn composes with.
+  const rotated = mul3(m, trs.rotation);
   const d: Vec3 = [
     trs.translation[0] - pivot[0],
     trs.translation[1] - pivot[1],
     trs.translation[2] - pivot[2],
   ];
-  const moved: Vec3 = [
-    basis[0]! * d[0] + basis[3]! * d[1] + basis[6]! * d[2] + pivot[0],
-    basis[1]! * d[0] + basis[4]! * d[1] + basis[7]! * d[2] + pivot[1],
-    basis[2]! * d[0] + basis[5]! * d[1] + basis[8]! * d[2] + pivot[2],
+  const spun: Vec3 = [
+    m[0]! * d[0] + m[3]! * d[1] + m[6]! * d[2],
+    m[1]! * d[0] + m[4]! * d[1] + m[7]! * d[2],
+    m[2]! * d[0] + m[5]! * d[1] + m[8]! * d[2],
   ];
-  return compose({ rotation: mul3(basis, trs.rotation), scale: trs.scale, translation: moved });
+  return compose({
+    rotation: rotated,
+    scale: trs.scale,
+    translation: [pivot[0] + spun[0], pivot[1] + spun[1], pivot[2] + spun[2]],
+  });
 }
 
 export function withTranslation(base: readonly number[], delta: Vec3): number[] {
@@ -296,9 +297,13 @@ export function withTranslation(base: readonly number[], delta: Vec3): number[] 
 export function withScaleFromDragged(base: readonly number[], dragged: readonly number[]): number[] {
   const start = decompose(base);
   const now = decompose(dragged);
+  // The dragged matrix is the base rotation times the new factor, so the factor
+  // is the dragged column length over the base one (1 for an unrotated object,
+  // which is why plain objects behave unchanged).
   const axis = (i: 0 | 1 | 2): number => {
     const factor = now.scale[i];
-    return Number.isFinite(factor) && factor !== 0 ? factor : start.scale[i];
+    const wanted = start.scale[i] !== 0 ? factor / start.scale[i] : factor;
+    return Number.isFinite(wanted) && wanted !== 0 ? wanted : start.scale[i];
   };
   return compose({
     rotation: start.rotation,

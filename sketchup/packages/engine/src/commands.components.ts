@@ -36,11 +36,19 @@ export function makeComponent(id: SolidId, delta: Vec3 = [0, 0, 0], name?: strin
     label: "Make Component",
     apply(doc, ctx) {
       const src = requireSolid(doc, id);
-      if (src.recipe.kind === "instance" && src.recipe.definition) {
-        throw new Error(`${definitionName(src)} is already a component; use Copy to place another instance`);
+      const index = componentIndex(doc);
+      // A body that already belongs to a set can still be promoted: the user
+      // picked "Make Component" on the corner window, and forcing them to detach
+      // first is a step SketchUp does not ask for. It may not *rename* the set it
+      // is in, though: that would silently rename every sibling.
+      const already = src.recipe.kind === "instance" ? src.recipe.definition : undefined;
+      const definition = normaliseDefinition(name ?? already ?? src.meta.name);
+      if (already && already !== definition) {
+        throw new Error(`this object belongs to "${already}", so making it "${definition}" would rename every copy; detach it first`);
       }
-      const definition = normaliseDefinition(name ?? src.meta.name);
-      if (componentIndex(doc).has(definition)) {
+      // Joining the set you are already in is the one repeat that is not a clash.
+      const joining = already === definition && index.has(definition);
+      if (index.has(definition) && !joining) {
         throw new Error(`a component called "${definition}" already exists; pick another name`);
       }
       if (delta.every((d) => d === 0)) throw new Error("place the first instance away from the source");
@@ -56,10 +64,17 @@ export function makeComponent(id: SolidId, delta: Vec3 = [0, 0, 0], name?: strin
         definition,
       };
       const newId = ctx.nextId();
+      // The label for the definition row, the same either way (see
+      // `definitionRowName`).
+      const meta = { ...src.meta, name: definitionRowName(definition) };
+      // The source becomes a bare definition: it keeps a labelled row in the
+      // model, but it is no longer a drawable body, so it must not be rendered
+      // (or mesh-validated) as a second copy sitting on the first one. The
+      // instance below carries the volume.
       const renamed: Solid = {
         ...src,
         revision: src.revision + 1,
-        meta: { ...src.meta, name: `${definition} (definition)` },
+        meta: { ...meta, hidden: true },
       };
       const instance: Solid = {
         id: newId,
@@ -67,8 +82,10 @@ export function makeComponent(id: SolidId, delta: Vec3 = [0, 0, 0], name?: strin
         recipe: instanceRecipe,
         meta: { ...src.meta, name: definition, hidden: false, locked: false },
       };
-      // Validate against both halves at once: the renamed source is the
-      // instance's parent in the graph the patch would leave behind.
+      // Validate the instance against the patch it will live in. The source's own
+      // mesh is no longer the thing that has volume (it is a hidden definition
+      // now), so it is deliberately not re-validated here: hiding it is what
+      // makes "one component, one body on screen" true.
       const after: DocumentState = { ...doc, solids: new Map([...doc.solids, [id, renamed]]) };
       assertResolvable(after, ctx, newId, instance, instanceRecipe);
       return patchOf(
@@ -102,9 +119,27 @@ export function renameDefinition(definition: string, name: string): Command {
     label: `Rename Component ${to}`,
     apply(state, ctx) {
       if (from === to) return patchOf(state, new Map(), new Map(), "No change");
-      if (componentIndex(state).has(to)) throw new Error(`a component called "${to}" already exists`);
+      const index = componentIndex(state);
+      // "Is this name taken?" must ignore the set being renamed: taking a name it
+      // held before (Post cap -> Window -> Post cap) is legal, and only a
+      // *different* set already using `to` is a clash, so `from` itself is exempt.
+      if (index.has(to) && from !== to) {
+        throw new Error(`a component called "${to}" already exists`);
+      }
       const forward = new Map<SolidId, Solid | null>();
       const backward = new Map<SolidId, Solid | null>();
+      for (const solid of state.solids.values()) {
+        // The set's definition row follows the rename, so the outliner keeps
+        // saying which set that hidden body belongs to.
+        if (solid.recipe.kind !== "instance" && solid.meta.name === `${from} (definition)`) {
+          forward.set(solid.id, {
+            ...solid,
+            revision: solid.revision + 1,
+            meta: { ...solid.meta, name: definitionRowName(to) },
+          });
+          backward.set(solid.id, solid);
+        }
+      }
       for (const solid of state.solids.values()) {
         const r = solid.recipe;
         if (r.kind !== "instance" || r.definition !== from) continue;
@@ -139,13 +174,17 @@ export function detachDefinition(definition: string): Command {
   return {
     kind: "detachDefinition",
     label: `Detach Component ${from}`,
-    apply(state) {
+    apply(state, ctx) {
       const forward = new Map<SolidId, Solid | null>();
       const backward = new Map<SolidId, Solid | null>();
       for (const solid of state.solids.values()) {
         const r = solid.recipe;
         if (r.kind !== "instance" || r.definition !== from) continue;
         const { definition: _drop, ...rest } = r;
+        // Dropping the name turns an instance into a plain transform whose
+        // `source` must still resolve; a second detach on a set that has already
+        // lost a definition (an undo re-issue) must not slip past this check.
+        ctx.resolveWith?.(rest, new Map(state.solids));
         forward.set(solid.id, { ...solid, revision: solid.revision + 1, recipe: rest });
         backward.set(solid.id, solid);
       }
@@ -187,6 +226,16 @@ function componentIndex(doc: DocumentState): Map<string, SolidId[]> {
 /** The definition an instance belongs to, or its own name for a one-off. */
 export function definitionName(solid: Solid): string {
   return solid.recipe.kind === "instance" && solid.recipe.definition ? solid.recipe.definition : solid.meta.name;
+}
+
+/**
+ * A definition row is a hidden body with no instance pointing at it by name, so
+ * its label is the only way to tell which set it belongs to in the outliner. It
+ * is derived from the set's name, never carried over: the body may have been
+ * called anything before it became a definition.
+ */
+export function definitionRowName(definition: string): string {
+  return `${definition} (definition)`;
 }
 
 /**

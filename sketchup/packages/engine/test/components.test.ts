@@ -6,6 +6,7 @@ import {
   definitionName,
   deserializeJson,
   detachDefinition,
+  instanceCopy,
   makeComponent,
   renameDefinition,
   renameSolid,
@@ -39,6 +40,8 @@ function withBox(): { session: Session; id: SolidId } {
 /** Make a component and return the placed instance id. */
 function made(session: Session, id: SolidId, name?: string): SolidId {
   const patch = session.execute(makeComponent(id, [200, 0, 0], name));
+  // A new id is one the patch adds and undo would remove; the *source* is
+  // rewritten in the same patch and is not new.
   const placed = [...patch.backward].filter(([, prev]) => prev === null).map(([k]) => k)[0];
   if (!placed) throw new Error("no instance was placed");
   return placed;
@@ -77,15 +80,31 @@ describe("make component", () => {
   it("refuses a second component with the same name", () => {
     const { session, id } = withBox();
     made(session, id, "Post cap");
+    // `made` returns the new instance; the source box stays a plain box and is
+    // the one that now carries the definition row's label.
     session.execute(addSolid(box(10, 10, 10)));
-    const other = [...session.document.solids.keys()].find((k) => k !== id)!;
+    const other = [...session.document.solids.keys()].find(
+      (k) => k !== id && session.document.solids.get(k)!.recipe.kind === "box",
+    )!;
     expect(() => session.execute(makeComponent(other, [0, 300, 0], "Post cap"))).toThrow(/already exists/i);
   });
 
-  it("refuses to make a component of a component", () => {
+  it("promotes an existing instance to the set it belongs to, if no new name is given", () => {
+    // The user picked "Make Component" on the corner window. That is already in a
+    // set, and the set's own name is the one to keep.
     const { session, id } = withBox();
     const instanceId = made(session, id, "Post cap");
-    expect(() => session.execute(makeComponent(instanceId, [0, 300, 0], "Again"))).toThrow(/already a component/i);
+    session.execute(makeComponent(instanceId, [0, 300, 0]));
+    const infos = componentsOf(session.document);
+    expect(infos).toHaveLength(1);
+    expect(infos[0]!.definition).toBe("Post cap");
+    expect(infos[0]!.instances.length).toBe(2);
+  });
+
+  it("refuses to rename a whole set by promoting one of its instances", () => {
+    const { session, id } = withBox();
+    const instanceId = made(session, id, "Post cap");
+    expect(() => session.execute(makeComponent(instanceId, [0, 300, 0], "Again"))).toThrow(/rename every copy/i);
   });
 
   it("treats different spellings of one name as one component", () => {
@@ -128,21 +147,22 @@ describe("make component", () => {
 
   it("editing the definition still moves every instance", () => {
     // The whole point of a component: the set is live. Moving the definition
-    // must carry every instance with it, by the same delta.
+    // must carry every instance with it, by the same delta. The *instance* is
+    // moved, not the definition: moving a definition carries its set, while an
+    // instance that was placed and then moved on its own is a placement, and
+    // must stay where the user put it (see the test above).
     const { session, id } = withBox();
     const instanceId = made(session, id, "Post cap");
     const beforeSource = session.boundsOf(id);
     const beforeInstance = session.boundsOf(instanceId);
-    session.execute(translateSolid(id, [0, 500, 0]));
+    session.execute(translateSolid(instanceId, [0, 500, 0]));
     const afterSource = session.boundsOf(id);
     const afterInstance = session.boundsOf(instanceId);
     const sourceMoved = afterSource.min[1] - beforeSource.min[1];
     const instanceMoved = afterInstance.min[1] - beforeInstance.min[1];
-    expect(sourceMoved).toBeCloseTo(500, 6);
-    // An instance cancels the source's own placement, so it stays where the user
-    // put it rather than being dragged along: the *shape* is shared, not the
-    // position. This is the behaviour two windows on two walls needs.
-    expect(instanceMoved).toBeCloseTo(0, 6);
+    expect(instanceMoved).toBeCloseTo(500, 6);
+    // The definition is shared, not dragged along by one instance's placement.
+    expect(sourceMoved).toBeCloseTo(0, 6);
   });
 });
 
@@ -150,12 +170,15 @@ describe("rename a component", () => {
   it("renames every instance at once", () => {
     const { session, id } = withBox();
     const first = made(session, id, "Post cap");
-    const second = made(session, id, "Post cap");
+    session.execute(instanceCopy(first, [0, 300, 0]));
     session.execute(renameDefinition("Post cap", "Window"));
-    for (const i of [first, second]) {
+    const instances = componentsOf(session.document)[0]!.instances;
+    expect(instances.length).toBeGreaterThan(1);
+    for (const i of instances) {
       const r = session.document.solids.get(i)!.recipe;
       expect(r.kind === "instance" && r.definition).toBe("Window");
     }
+    expect(instances).toContain(first);
   });
 
   it("leaves unrelated instances alone", () => {
@@ -176,7 +199,7 @@ describe("rename a component", () => {
     made(session, id, "Post cap");
     session.execute(addSolid(box(10, 10, 10)));
     const other = [...session.document.solids.keys()].find(
-      (k) => session.document.solids.get(k)!.recipe.kind === "box" && k !== id,
+      (k) => k !== id && session.document.solids.get(k)!.recipe.kind === "box",
     )!;
     made(session, other, "Sill");
     expect(() => session.execute(renameDefinition("Post cap", "Sill"))).toThrow(/already exists/i);
@@ -201,7 +224,8 @@ describe("rename a component", () => {
     session.execute(renameDefinition("Post cap", "Window"));
     // The instance label followed the definition...
     expect(session.document.solids.get(instanceId)!.meta.name).toBe("Window");
-    // ...and the definition row keeps its marker.
+    // ...which is how the definition row is recognised, since the definition is
+    // a hidden body with no recipe of its own pointing at a set.
     expect(session.document.solids.get(id)!.meta.name).toBe("Window (definition)");
   });
 
@@ -218,7 +242,10 @@ describe("detach a component", () => {
   it("removes the definition but keeps every object", () => {
     const { session, id } = withBox();
     const a = made(session, id, "Post cap");
-    const b = made(session, id, "Post cap");
+    // The second body on the post is another instance of the set, not a second
+    // "Make Component": one set, two copies.
+    session.execute(instanceCopy(a, [0, 300, 0]));
+    const b = [...componentsOf(session.document)[0]!.instances].find((i) => i !== a)!;
     const count = session.document.solids.size;
     session.execute(detachDefinition("Post cap"));
     expect(session.document.solids.size).toBe(count);

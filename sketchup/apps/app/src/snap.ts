@@ -1,4 +1,4 @@
-import type { Vec3 } from "@apexus/geometry";
+import type { MeshData, Vec3 } from "@apexus/geometry";
 import {
   boundsQuadrants,
   edgeMidpoints,
@@ -36,7 +36,7 @@ interface CandidateCache {
 
 interface MeshCache {
   doc: unknown;
-  entries: readonly (readonly [string, Float32Array])[];
+  entries: readonly (readonly [string, MeshData])[];
 }
 
 export class Snapper {
@@ -61,7 +61,7 @@ export class Snapper {
       } catch {
         continue;
       }
-      points.push(...vertices(mesh.positions), ...edgeMidpoints(mesh.positions), ...faceCentres(mesh.positions));
+      points.push(...vertices(mesh.positions), ...edgeMidpoints(mesh.positions), ...faceCentres(mesh));
       // Quadrants of each object, so a dimension can be read across an object
       // without hunting for a corner.
       const b = this.#session.boundsOf(id);
@@ -103,13 +103,13 @@ export class Snapper {
   }
 
   /** Meshes of every solid, cached against the document revision. */
-  #meshes(): readonly (readonly [string, Float32Array])[] {
+  #meshes(): readonly (readonly [string, MeshData])[] {
     const doc = this.#session.document;
     if (this.#meshCache.doc === doc) return this.#meshCache.entries;
-    const entries: [string, Float32Array][] = [];
+    const entries: [string, MeshData][] = [];
     for (const id of doc.solids.keys()) {
       try {
-        entries.push([id, this.#session.meshOf(id).positions]);
+        entries.push([id, this.#session.meshOf(id)]);
       } catch {
         // A solid that cannot be meshed contributes no snaps.
       }

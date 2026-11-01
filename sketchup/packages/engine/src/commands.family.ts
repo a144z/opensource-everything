@@ -94,15 +94,29 @@ export function liveCopyRecipe(
   src: Solid,
   delta: Vec3,
 ): { recipe: Extract<SolidRecipe, { kind: "instance" }>; source: Solid } {
+  // A pinned copy holds the user's placement in the copy itself; anything else
+  // holds it in the recipe the copy points at.
   const pinned = src.recipe.kind === "transform";
   const source = pinned ? requireSolid(doc, src.recipe.child) : src;
-  const at = pinned ? src.recipe.matrix : source.recipe.matrix;
+  // Where the source actually stands. That is the copy's own matrix for a pinned
+  // copy, and for an instance it is the matrix the instance carries (which
+  // already cancels its definition row). Only a plain body stores it in its own
+  // recipe matrix.
+  const at = pinned || src.recipe.kind === "instance" ? src.recipe.matrix : source.recipe.matrix;
+  // A copy of a component is another instance of that component, not a loose
+  // body that happens to share its geometry: that is the whole point of a set.
+  const definition = src.recipe.kind === "instance" ? src.recipe.definition : undefined;
   return {
     source,
     recipe: {
       kind: "instance",
+      ...(definition === undefined ? {} : { definition }),
       source: source.id,
-      origin: [...at],
+      // The mesh resolves source recipe × origin × matrix. `origin` cancels the
+      // source's placement, `matrix` is where this copy stands, and `delta` moves
+      // it along in world space. Writing each term once is what keeps a copy of a
+      // copy landing one delta away instead of two.
+      origin: at,
       matrix: multiply4(at, translation4(delta)),
     },
   };

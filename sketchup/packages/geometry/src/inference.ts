@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Inference and snapping (task L1-6). Pure functions over candidate points, so
  * they are unit-testable without a renderer.
  *
@@ -8,7 +8,7 @@
  *   - what the snapped point is, plus the glyph to show next to the cursor.
  */
 
-import type { Vec3 } from "./index.js";
+import type { MeshData, Vec3 } from "./index.js";
 import { distance, sub } from "./index.js";
 import { snapVec } from "./units.js";
 
@@ -205,43 +205,77 @@ export function vertices(positions: Float32Array): readonly SnapCandidate[] {
  *
  * A box has six faces and a triangulated face has two triangles; both must yield
  * one centre, or the cursor would find two "Centre" points a few millimetres
- * apart and snap to whichever came first. Faces are keyed by their plane
- * (normal + offset), which is exact for the boxes and extrusions this app makes.
+ * apart and snap to whichever came first. Faces are grouped by their plane
+ * (normal + offset), judged with a tolerance rather than a formatted key: a
+ * rotated or lathed face arrives with a normal that is equal only to within
+ * float error, so an exact key gives every triangle its own group and the centre
+ * lands on a sliver instead of the face.
+ *
+ * The plane is also measured against the triangle's own vertices, not just the
+ * shared normal, so an L-shaped face that shares a normal with a neighbour (two
+ * coplanar faces at different offsets) never merges into one group.
  */
-export function faceCentres(positions: Float32Array): readonly SnapCandidate[] {
+export function faceCentres(mesh: MeshData): readonly SnapCandidate[] {
   interface Face {
     normal: Vec3;
     offset: number;
     sum: [number, number, number];
-    count: number;
+    weight: number;
   }
-  const faces = new Map<string, Face>();
-  for (let i = 0; i + 8 < positions.length; i += 9) {
-    const a: Vec3 = [positions[i]!, positions[i + 1]!, positions[i + 2]!];
-    const b: Vec3 = [positions[i + 3]!, positions[i + 4]!, positions[i + 5]!];
-    const c: Vec3 = [positions[i + 6]!, positions[i + 7]!, positions[i + 8]!];
-    const n = unit(triangleNormal(a, b, c));
+  /** Planes closer than this (degrees / mm) are the same face. */
+  const NORMAL_TOLERANCE = 1e-3;
+  const OFFSET_TOLERANCE = 1e-2;
+  const faces: Face[] = [];
+  for (let i = 0; i + 2 < mesh.indices.length; i += 3) {
+    // Same three reads the loop below does, one triangle at a time: the caller
+    // hands over an indexed mesh, and a triangle-soup buffer is `positions`
+    // alone, so reading `positions` directly would take a corner list for a
+    // list of triangles.
+    const read = (k: number): Vec3 => [
+      mesh.positions[mesh.indices[k]! * 3]!,
+      mesh.positions[mesh.indices[k]! * 3 + 1]!,
+      mesh.positions[mesh.indices[k]! * 3 + 2]!,
+    ];
+    const a = read(i);
+    const b = read(i + 1);
+    const c = read(i + 2);
+    const raw = triangleNormal(a, b, c);
+    const n = unit(raw);
+    // A degenerate triangle has no plane; keeping one would invent a face.
     if (!n) continue;
+    // `raw` is twice the area, so it is the weight that makes the centre the
+    // area-centre of the face: a quad split into a fat and a thin triangle would
+    // otherwise pull the centre toward the middle of the two triangle centres.
+    const weight = Math.hypot(raw[0], raw[1], raw[2]);
     const offset = n[0] * a[0] + n[1] * a[1] + n[2] * a[2];
-    const key = `${n.map((v) => v.toFixed(3)).join(",")}|${offset.toFixed(3)}`;
-    const face = faces.get(key);
+    let face = faces.find(
+      (f) =>
+        // Compare on absolute factors: `positions` is Float32Array, so a -1
+        // normal written as float32 differs from the exact -1 by ~1e-8 and a
+        // mixed "簣x OR 簣y" test would accept a face at right angles to it.
+        Math.abs(f.normal[0] - n[0]) <= NORMAL_TOLERANCE &&
+        Math.abs(f.normal[1] - n[1]) <= NORMAL_TOLERANCE &&
+        Math.abs(f.normal[2] - n[2]) <= NORMAL_TOLERANCE &&
+        Math.abs(f.offset - offset) <= OFFSET_TOLERANCE,
+    );
     if (face) {
-      face.count += 3;
-      face.sum[0] += a[0] + b[0] + c[0];
-      face.sum[1] += a[1] + b[1] + c[1];
-      face.sum[2] += a[2] + b[2] + c[2];
+      face.weight += weight;
+      face.sum[0] += ((a[0] + b[0] + c[0]) * weight) / 3;
+      face.sum[1] += ((a[1] + b[1] + c[1]) * weight) / 3;
+      face.sum[2] += ((a[2] + b[2] + c[2]) * weight) / 3;
     } else {
-      faces.set(key, {
+      face = {
         normal: n,
         offset,
-        sum: [a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]],
-        count: 3,
-      });
+        sum: [((a[0] + b[0] + c[0]) * weight) / 3, ((a[1] + b[1] + c[1]) * weight) / 3, ((a[2] + b[2] + c[2]) * weight) / 3],
+        weight,
+      };
+      faces.push(face);
     }
   }
-  return [...faces.values()].map((f) => ({
+  return faces.map((f) => ({
     kind: "centre" as const,
-    point: [f.sum[0] / f.count, f.sum[1] / f.count, f.sum[2] / f.count] as Vec3,
+    point: [f.sum[0] / f.weight, f.sum[1] / f.weight, f.sum[2] / f.weight] as Vec3,
     normal: f.normal,
   }));
 }
@@ -283,17 +317,18 @@ export function boundsQuadrants(min: Vec3, max: Vec3): readonly SnapCandidate[] 
  */
 export function perpendicularFeet(
   from: Vec3,
-  positions: Float32Array,
+  mesh: MeshData,
   tolerance: number,
 ): readonly SnapCandidate[] {
   const out: SnapCandidate[] = [];
   const seen = new Set<string>();
-  for (let i = 0; i + 8 < positions.length; i += 9) {
-    const tri: readonly Vec3[] = [
-      [positions[i]!, positions[i + 1]!, positions[i + 2]!],
-      [positions[i + 3]!, positions[i + 4]!, positions[i + 5]!],
-      [positions[i + 6]!, positions[i + 7]!, positions[i + 8]!],
-    ];
+  const read = (k: number): Vec3 => [
+    mesh.positions[mesh.indices[k]! * 3]!,
+    mesh.positions[mesh.indices[k]! * 3 + 1]!,
+    mesh.positions[mesh.indices[k]! * 3 + 2]!,
+  ];
+  for (let i = 0; i + 2 < mesh.indices.length; i += 3) {
+    const tri: readonly Vec3[] = [read(i), read(i + 1), read(i + 2)];
     for (let e = 0; e < 3; e++) {
       const p = tri[e]!;
       const q = tri[(e + 1) % 3]!;
@@ -326,6 +361,9 @@ function triangleNormal(a: Vec3, b: Vec3, c: Vec3): Vec3 {
 
 function unit(v: Vec3): Vec3 | null {
   const len = Math.hypot(v[0], v[1], v[2]);
-  if (len < 1e-12) return null;
+  // `triangleNormal` returns twice the area. Anything under a thousandth of a
+  // square millimetre can only be float noise from three collinear corners, and
+  // a real face one half-micron across is not something a user can click.
+  if (len <= 1e-3) return null;
   return [v[0] / len, v[1] / len, v[2] / len];
 }

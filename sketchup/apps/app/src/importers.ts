@@ -22,7 +22,6 @@
  */
 
 import {
-  EMPTY_AABB,
   fromDxf,
   fromStlAscii,
   meshBounds,
@@ -111,16 +110,23 @@ export function readImport(fileName: string, text: string): ImportOutcome {
 }
 
 function meshFile(name: string, mesh: MeshData, note: string): ImportOutcome {
-  if (mesh.indices.length < 3) return { kind: "error", reason: `${name}: the file has no faces.` };
+  // The engine refuses a mesh whose indices are not whole triangles, so a reader
+  // that melted a corner must not hand it a leftover index. A truncated tail is
+  // dropped rather than failing the file, and `bounds` is sized from the same
+  // index run the recipe keeps so the two can never disagree.
+  const whole = mesh.indices.length - (mesh.indices.length % 3);
+  const indices = mesh.indices.subarray(0, whole);
+  if (indices.length < 3) return { kind: "error", reason: `${name}: the file has no faces.` };
   // A mesh recipe carries raw arrays and an identity matrix; the document never
   // stores a second copy of the transform, per schema 5.
   const recipe: SolidRecipe = {
     kind: "mesh",
     positions: Array.from(mesh.positions),
-    indices: Array.from(mesh.indices),
+    indices: Array.from(indices),
     matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
   };
-  return { kind: "mesh", name, recipe, bounds: mesh.indices.length === 0 ? EMPTY_AABB : meshBounds(mesh), note };
+  const bounds = meshBounds({ positions: mesh.positions, indices });
+  return { kind: "mesh", name, recipe, bounds, note };
 }
 
 /** Scale positions in place; `weld` has not run yet, so every corner moves once. */
