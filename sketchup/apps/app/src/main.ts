@@ -1681,6 +1681,12 @@ interface FitCheckHarness {
   rootIds(): string[];
   /** Select exactly one object. */
   selectOnly(id: string): void;
+  /** Click a solid through the active tool, at a point on its top face by default. */
+  clickFace(id: string, at?: [number, number, number]): void;
+  /** The ring of a face, or null when the object is not a flat face. */
+  ringOf(id: string): [number, number][] | null;
+  /** The undo stack's labels, newest last, so a test can name each step. */
+  historyLabels(): string[];
   /** Choose a tool exactly as the toolbar button does. */
   useTool(tool: string): void;
   /**
@@ -1861,6 +1867,20 @@ window.fitcheck = {
   selectOnly(id) {
     setSelection([id as SolidId]);
   },
+  clickFace(id, at) {
+    // The Offset tool takes a pick, not a ground point: hand it the same hit
+    // shape the real picker produces so the probe drives the real path.
+    const solid = session.document.solids.get(id as SolidId);
+    if (!solid) return;
+    const b = session.boundsOf(solid.id);
+    const point = at ?? [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, b.max[2]];
+    tools.click({ kind: "solid", id: solid.id, faceNormal: [0, 0, 1], point }, false, 0, 0);
+  },
+  ringOf(id) {
+    const recipe = session.document.solids.get(id as SolidId)?.recipe;
+    return recipe?.kind === "face" ? recipe.points.map((p) => [p[0], p[1]] as [number, number]) : null;
+  },
+  historyLabels: () => [...session.historyLabels],
   boundsOf(id) {
     const solid = session.document.solids.get(id as SolidId);
     if (!solid) return [0, 0, 0, 0, 0, 0];

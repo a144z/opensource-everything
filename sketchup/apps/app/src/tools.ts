@@ -5,6 +5,7 @@ import {
   circlePoints,
   closedArc,
   counterClockwise,
+  offsetRing,
   parseLength,
   polygonPoints,
   polylineLength,
@@ -25,7 +26,6 @@ import {
   pullFace as pullFaceCmd,
   rotateSolids,
   scaleAbout,
-  scaleSolids,
   translateSolids,
   type Annotation,
   type Axis,
@@ -179,11 +179,16 @@ type Pending =
       current: Vec3;
     }
   | {
-      /** Offset: copy a solid and scale it about its own centre. */
+      /**
+       * Offset: an inset or outset of one face's ring, previewed live. The ring
+       * and plane are taken once at the click, so dragging cannot chase a face
+       * that has moved under the cursor.
+       */
       readonly kind: "offset";
       readonly id: SolidId;
-      readonly centre: Vec3;
-      readonly base: number;
+      readonly ring: readonly Vec2[];
+      readonly plane: { readonly origin: Vec3; readonly normal: Vec3 };
+      /** Distance in mm; negative insets, positive outsets. */
       current: number;
     };
 
@@ -554,7 +559,11 @@ export class ToolController {
         p.typed = parsed.mm;
         this.#drawPull(p, parsed.mm);
       } else {
-        p.current = p.base + parsed.mm;
+        // A typed number is a size, and SketchUp reads a bare offset as inward:
+        // type 100 to shrink by 100. With the cursor already outside, growing
+        // is what the user is doing, so the sign of the drag is kept. The
+        // commit itself happens once, in the shared tail below.
+        p.current = p.current > 0 ? parsed.mm : -parsed.mm;
         this.#drawOffset(p);
       }
     } else if ((p.kind === "line" || p.kind === "tape" || p.kind === "dimension") && parsed) {
@@ -734,11 +743,21 @@ export class ToolController {
       this.#drawSpan(last, point);
       this.#host.setHint("Follow Me: click on the plane to finish the path, Esc cancels");
     } else if (p?.kind === "offset") {
-      p.current = p.base + this.#anchorDelta(p.id, clientX, clientY);
+      // The plane the face lies in, not the ground: a face drawn on a wall is
+      // offset along the wall.
+      const at = point ?? this.#host.view.planePoint(clientX, clientY, p.plane.origin, p.plane.normal);
+      p.current = this.#offsetDistance(p, at);
       this.#drawOffset(p);
-      const shown = p.current - p.base;
-      this.#measure = lengthValue(shown < 0 ? "Offset inward" : "Offset outward", Math.abs(shown), this.#host.unit(), "click to apply");
-      this.#host.setHint("Esc cancels");
+      const result = offsetRing(p.ring, p.current);
+      this.#measure = lengthValue(
+        p.current < 0 ? "Offset inward" : "Offset outward",
+        Math.abs(p.current),
+        this.#host.unit(),
+        result.ok ? "click to apply" : offsetRefusal(result.reason),
+      );
+      this.#host.setHint(
+        result.ok ? "Esc cancels" : `Offset: ${offsetRefusal(result.reason)}`,
+      );
     } else if (p?.kind === "move" || p?.kind === "rotate") {
       const plane = p.kind === "move" ? { at: p.from, n: p.planeNormal } : { at: p.pivot, n: GLOSSARY_UP };
       const pt = this.#host.view.planePoint(clientX, clientY, plane.at, plane.n);
@@ -1307,45 +1326,70 @@ export class ToolController {
 
   /* ---------------------------------------------------------------- offset */
 
+  /**
+   * Offset insets or outsets the face under the cursor, the way SketchUp does:
+   * move in to shrink it, out to grow it, click to keep the new ring.
+   */
   #clickOffset(hit: PickHit): void {
     const p = this.#pending;
     if (p?.kind === "offset") {
       this.#commitOffset(p);
       return;
     }
-    if (hit.kind !== "solid") {
-      this.#host.setHint("Offset: click a face to create an inset copy.");
+    const solid = hit.kind === "solid" ? hit : null;
+    const face = solid ? this.#faceRing(solid.id) : null;
+    if (!solid || !face) {
+      this.#host.setHint("Offset: click a face to inset or expand it.");
       return;
     }
-    const bounds = this.#host.session.boundsOf(hit.id);
-    const centre: Vec3 = [(bounds.min[0] + bounds.max[0]) / 2, (bounds.min[1] + bounds.max[1]) / 2, (bounds.min[2] + bounds.max[2]) / 2];
-    this.#pending = { kind: "offset", id: hit.id, centre, base: 0, current: 0 };
-    this.#host.select([hit.id]);
+    this.#pending = { kind: "offset", id: solid.id, ring: face.points, plane: face.plane, current: 0 };
+    this.#host.select([solid.id]);
     this.#host.setHint("Offset: move inward to shrink, outward to grow; click to apply.");
   }
 
-  /** Signed movement of the cursor projected onto the screen-space outward axis. */
-  #anchorDelta(_id: SolidId, clientX: number, clientY: number): number {
-    const c = this.#host.cursor();
-    return (clientX - c.x) + (clientY - c.y);
+  /** The ring of a flat face, or null for anything with volume. */
+  #faceRing(id: SolidId): { points: readonly Vec2[]; plane: { origin: Vec3; normal: Vec3 } } | null {
+    const recipe = this.#host.session.document.solids.get(id)?.recipe;
+    if (recipe?.kind !== "face") return null;
+    return { points: recipe.points, plane: recipe.plane };
+  }
+
+  /**
+   * The offset distance under the cursor, signed the way `#current` stores it:
+   * positive means the new ring grows outward, negative means it shrinks
+   * inward. So a point outside the face grows it, and a point inside shrinks it
+   * by how far it sits from the nearest wall — the new line follows the pointer,
+   * rather than a scale factor that has nothing to do with the geometry.
+   */
+  #offsetDistance(p: Extract<Pending, { kind: "offset" }>, at: Vec3 | null): number {
+    if (!at) return p.current;
+    const xy: Vec2 = [at[0], at[1]];
+    const d = distanceToRing(p.ring, xy);
+    return pointInRing(p.ring, xy) ? -d : d;
   }
 
   #commitOffset(p: Extract<Pending, { kind: "offset" }>): void {
+    const d = p.current;
     this.#cancel();
-    const bounds = this.#host.session.boundsOf(p.id);
-    const size = [bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]] as const;
-    const widest = Math.max(size[0], size[1], size[2], 1);
-    // The delta is screen pixels; 0.25% of the widest span per pixel keeps the
-    // effect visible at any zoom without needing a world-space ray.
-    const grow = (p.current / 400) * widest * 0.25;
-    const scaleFactor = Math.max(0.01, 1 + (grow * 2) / widest);
-    if (Math.abs(scaleFactor - 1) < 0.005) {
+    if (Math.abs(d) < 0.5) {
       this.#host.setHint("Offset cancelled: no change.");
       return;
     }
+    const result = offsetRing(p.ring, d);
+    if (!result.ok) {
+      this.#host.setHint(offsetRefusal(result.reason));
+      return;
+    }
     try {
-      this.#host.session.execute(scaleSolids([p.id], [scaleFactor, scaleFactor, scaleFactor], p.centre));
-      this.#host.setHint(`Offset applied: ${(scaleFactor * 100).toFixed(1)}% of original size.`);
+      // Select what was made: Offset leaves the new ring in hand, the way a
+      // freshly drawn face is selected, so the next tool acts on it.
+      const before = new Set(this.#host.session.document.solids.keys());
+      this.#host.session.execute(addFaceCmd(result.points, p.plane, { name: "Offset face" }));
+      const made = [...this.#host.session.document.solids.keys()].find((id) => !before.has(id));
+      if (made) this.#host.select([made]);
+      // The typed path ends here, so the hint must still read "outward" when the
+      // number was committed rather than the preview the cursor last drew.
+      this.#host.setHint(`Offset ${d < 0 ? "inward" : "outward"} by ${formatLengthIn(this.#host.unit(), Math.abs(d))}.`);
     } catch (err) {
       this.#host.setHint((err as Error).message);
     }
@@ -1627,25 +1671,19 @@ export class ToolController {
     this.#setPreview(lifted);
   }
 
+  /** The offset preview: the proposed ring, in its own plane, at the face's level. */
   #drawOffset(p: Extract<Pending, { kind: "offset" }>): void {
-    const bounds = this.#host.session.boundsOf(p.id);
-    const grow = p.current / 400;
-    const m = new THREE.Matrix4()
-      .makeTranslation(...p.centre)
-      .multiply(new THREE.Matrix4().makeScale(1 + grow, 1 + grow, 1 + grow))
-      .multiply(new THREE.Matrix4().makeTranslation(-p.centre[0], -p.centre[1], -p.centre[2]));
-    const pts = [
-      [bounds.min[0], bounds.min[1], bounds.min[2]],
-      [bounds.max[0], bounds.min[1], bounds.min[2]],
-      [bounds.max[0], bounds.max[1], bounds.min[2]],
-      [bounds.min[0], bounds.max[1], bounds.min[2]],
-      [bounds.min[0], bounds.min[1], bounds.min[2]],
-    ].map((v) => new THREE.Vector3(v[0]!, v[1]!, v[2]!).applyMatrix4(m));
-    const g = new THREE.BufferGeometry().setFromPoints(pts);
-    this.#ghost.geometry.dispose();
-    this.#ghost.geometry = g;
-    this.#ghost.computeLineDistances();
-    this.#host.view.invalidate();
+    const result = offsetRing(p.ring, p.current);
+    if (!result.ok) {
+      this.#clearPreview();
+      return;
+    }
+    // Lift along the normal so the proposed line never z-fights the face it
+    // copies, which sits in exactly the same plane.
+    const n = new THREE.Vector3(...p.plane.normal).normalize().multiplyScalar(0.5);
+    const ring = result.points.map((pt) => new THREE.Vector3(pt[0], pt[1], 0).add(n));
+    ring.push(ring[0]!.clone());
+    this.#setPreview(ring);
   }
 
   #setPreview(points: THREE.Vector3[]): void {
@@ -1700,6 +1738,45 @@ function makeDashedLine(color: number): THREE.Line {
   // An empty geometry has no position attribute, and computeLineDistances
   // throws on it. The first #setPreview supplies the points and their distances.
   return line;
+}
+
+/**
+ * Is a point inside a closed ring? Even-odd crossings, half-open on the top
+ * edge so a point exactly level with a vertex is counted once, not twice.
+ */
+function pointInRing(ring: readonly Vec2[], pt: Vec2): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i]!;
+    const b = ring[j]!;
+    if (a[1] > pt[1] !== b[1] > pt[1]) {
+      const x = a[0] + ((pt[1] - a[1]) / (b[1] - a[1])) * (b[0] - a[0]);
+      if (pt[0] < x) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Shortest distance from a point to the ring's outline (not to its interior). */
+function distanceToRing(ring: readonly Vec2[], pt: Vec2): number {
+  let best = Infinity;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[j]!;
+    const b = ring[i]!;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / len2)) : 0;
+    best = Math.min(best, Math.hypot(pt[0] - (a[0] + t * dx), pt[1] - (a[1] + t * dy)));
+  }
+  return best;
+}
+
+/** What to tell the user when an offset cannot be made. */
+function offsetRefusal(reason: "collapsed" | "self-intersect" | "too-short"): string {
+  if (reason === "too-short") return "this face has too few points to offset.";
+  if (reason === "self-intersect") return "that offset would cross itself; move back a little.";
+  return "that offset is too large for this face.";
 }
 
 /** The four corners of the XZ-aligned bounding box of a mesh's top face. */

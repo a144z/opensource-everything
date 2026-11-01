@@ -221,6 +221,7 @@ Run: `npm test` (all vitest projects). Filter: `npx vitest run apps/app`.
 
 | Date | Run | Command | Result | Notes |
 |---|---|---|---|---|
+| 2026-11-02 | gate | `.\harness.ps1 verify` | PASS | every check, typecheck 0 errors, 468/468 tests, smoke clean. Offset (L1-7): `offsetRing` mitred inset/outset with three honest refusals (15 unit tests), face click + live preview + typed distance, one undo step, 5 browser checks. |
 | 2026-11-01 | gate | `.\harness.ps1 verify` | PASS | every check, typecheck 0 errors, 453/453 tests, smoke clean. Inference wiring: `axisInference` (13 unit tests), Shift locks to a world axis, red/green/blue guide plus inference square drawn by the view, hint names the lock, screen-tolerance snapping covered by 4 new tests, and 4 browser checks for lock/free drags. |
 | 2026-11-01 | gate | `.\harness.ps1 verify` | PASS | every check, typecheck 0 errors, 436/436 tests, smoke clean. Adds the Line tool end to end: an open chain is one edge object and one undo step, closing on the start makes a face of the drawn area, typing places nothing until Enter and then exactly 500 mm, Escape leaves nothing. |
 | 2026-11-01 | gate | `.\harness.ps1 verify` | PASS | 10/10 checks, typecheck 0 errors, 424/424 tests, smoke clean. Cold start: the smoke step starts Vite on :5198 itself. |

@@ -88,7 +88,7 @@
         "negative (inward) and positive (outward) both work",
         "result is one undoable step"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "L1-8",

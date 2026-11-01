@@ -3,6 +3,48 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-02 (offset)
+
+Done
+- L1-7 passes. Offset is now SketchUp's inset, not a scaled copy: click a flat
+  face, move the pointer, click (or type a distance and press Enter) and a new
+  face is added inside or outside the old one, as one undo step.
+- `offsetRing(points, d)` in `packages/geometry/src/offset.ts`: pure, mitred
+  inset/outset, `d > 0` grows. It refuses three ways with a reason rather than
+  bending the ring: `too-short`, `self-intersect` (points outside the original
+  ring or a proper crossing) and `collapsed` (an inset vertex pushed closer than
+  |d| to a wall, zero area, or a flipped winding).
+- The tool reads the ring and plane from the `face` recipe at the click, so a
+  drag cannot chase a face that is moving under the cursor, and a face drawn on
+  a wall offsets in the wall's own plane.
+- Sign convention, in one place: `#current` is positive outward. A pointer
+  outside the face grows it, a pointer inside shrinks it by its distance to the
+  nearest wall, and typing a number keeps the sign the drag had (bare typing
+  with no drag insets, as SketchUp does).
+- Refusal is a status line, not an exception: "that offset would cross itself;
+  move back a little", "that offset is too large for this face".
+- Harness gained `clickFace(id)`, `ringOf(id)` and `historyLabels()`.
+- Tests: 15 unit tests for `offsetRing` (area 640000 for a 1000 square inset 100,
+  1440000 outset, the 600x400 acceptance rule, an L-shaped inset, refusals); 5
+  browser checks (inset area, outset area, one undo step, an impossible inset
+  refused, a refusal adds nothing and pushes no history).
+
+Decisions
+- Enter commits through the one shared tail in `#applyTyped`, as pull and rect
+  already did. The offset branch only previews. Committing in both places made
+  every typed offset two undo steps and two faces.
+- `historyLabels()` was added to the harness only to find that; it stays because
+  "one step" is otherwise untestable from the browser.
+- `#commitOffset` selects the face it made, so the next tool acts on the offset
+  rather than leaving the old face in hand.
+
+Open bugs
+- none known; gate green (all checks, typecheck 0 errors, 468/468 tests, smoke).
+
+Next
+1. L1-8 - Follow me.
+2. Then L1-10 dimension, L1-11 tape, L1-9 sticky/weld, L3-5/6/7, L1-15 soften.
+
 ## Cycle 2026-11-01 (inference + glyphs)
 
 Done

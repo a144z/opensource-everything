@@ -417,6 +417,80 @@ async function inferenceProbe(api) {
 }
 
 /**
+ * Offset (L1-7): draw a face, inset it by a typed distance, undo it, outset it
+ * and push one impossible inset. The area is read back from the ring the tool
+ * committed, so the check is geometry, not a message.
+ */
+async function offsetProbe(api) {
+  return evaluate(
+    api,
+    `(() => {
+      const h = window.fitcheck;
+      if (!h) return { skipped: true };
+      const area = (ring) => {
+        let a = 0;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          a += (ring[j][0] + ring[i][0]) * (ring[j][1] - ring[i][1]);
+        }
+        return Math.round(Math.abs(a / 2));
+      };
+      h.run('select');
+      h.drawLine([[0, 0], [1000, 0], [1000, 1000], [0, 1000]], true);
+      const face = h.lastAdded();
+      h.useTool('select');
+      if (!face) return { skipped: true, reason: 'no face' };
+
+      h.useTool('offset');
+      const undoBase = h.undoCount();
+      h.clickFace(face);
+      h.hoverGround([300, 300]);
+      h.typeText('100', false);
+      h.typeText('', true);
+      const insetId = h.lastAdded();
+      const insetRing = insetId ? h.ringOf(insetId) : null;
+      const offsetHint = h.hint();
+      const undoGrew = h.undoCount() - undoBase;
+      h.run('undo');
+
+      h.useTool('offset');
+      h.clickFace(face);
+      h.hoverGround([1500, 500]);
+      h.typeText('100', false);
+      h.typeText('', true);
+      const outsetId = h.lastAdded();
+      const outsetHint = h.hint();
+      const outsetRing = outsetId ? h.ringOf(outsetId) : null;
+
+      // Deeper than the face can take: the tool must refuse and add nothing.
+      const beforeRefuse = h.solids().length;
+      const undoBeforeRefuse = h.undoCount();
+      h.useTool('offset');
+      h.clickFace(face);
+      h.hoverGround([500, 500]);
+      h.typeText('600', false);
+      h.typeText('', true);
+      const refusedHint = h.hint();
+      const refused = /too|cross|large/i.test(refusedHint);
+      const refusedAdded = h.solids().length - beforeRefuse;
+      const refusedUndo = h.undoCount() - undoBeforeRefuse;
+      h.useTool('select');
+      h.run('select');
+      h.escape();
+      return {
+        skipped: false,
+        insetArea: insetRing ? area(insetRing) : null,
+        undoGrew,
+        outsetArea: outsetRing ? area(outsetRing) : null,
+        refused,
+        refusedHint,
+        refusedAdded,
+        refusedUndo,
+      };
+    })()`,
+  );
+}
+
+/**
  * Rebinding, persisted. Part one changes Rectangle from R to Alt+Q and checks the
  * old key stopped working and the new one started; part two runs after a page
  * reload, which is the only honest proof the change went to `localStorage` and
@@ -587,6 +661,17 @@ try {
     checks.push(
       ["a free segment keeps its diagonal", infer.free !== null && Math.abs(infer.free.dy) > 1, JSON.stringify(infer.free)],
     );
+  }
+
+  const offset = await offsetProbe(api);
+  if (offset.skipped) {
+    console.log("SKIP  offset (no window.fitcheck harness)");
+  } else {
+    checks.push(["offset of a 1000 square by 100 gives 800 square", offset.insetArea === 640000, String(offset.insetArea)]);
+    checks.push(["offset is one undo step", offset.undoGrew === 1, String(offset.undoGrew)]);
+    checks.push(["an outward offset grows the ring", offset.outsetArea === 1440000, String(offset.outsetArea)]);
+    checks.push(["an impossible inset is refused", offset.refused === true, String(offset.refused)]);
+    checks.push(["a refused offset adds nothing", offset.refusedAdded === 0 && offset.refusedUndo === 0, `${offset.refusedAdded}/${offset.refusedUndo}`]);
   }
 
   const groups = await groupProbe(api);
