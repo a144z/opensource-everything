@@ -1,0 +1,16 @@
+{
+  "name": "@apexus/kernel",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@apexus/engine": "*",
+    "@apexus/geometry": "*",
+    "manifold-3d": "^3.5.4"
+  }
+}

@@ -1,0 +1,260 @@
+:root {
+  --bg: #1b1d21;
+  --panel: #24272c;
+  --panel-2: #2d3137;
+  --text: #e6e8ea;
+  --dim: #9aa3ad;
+  --accent: #e8b04b;
+  --bad: #e8664b;
+  --good: #7fd694;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 232px 1fr;
+  height: 100vh;
+}
+
+#panel {
+  background: var(--panel);
+  border-right: 1px solid #000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+#panel header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+h1 {
+  font-size: 15px;
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 0 0 4px;
+}
+
+.ver {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid #3a3f46;
+  border-radius: 5px;
+  padding: 6px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #566;
+}
+
+button.active {
+  background: var(--accent);
+  color: #1b1d21;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.tools {
+  display: flex;
+  gap: 4px;
+}
+
+.tools button {
+  flex: 1;
+  padding: 6px 2px;
+  font-size: 11px;
+}
+
+.fit label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+  color: var(--dim);
+}
+
+.fit input {
+  width: 100%;
+  background: #1b1d21;
+  border: 1px solid #3a3f46;
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+  font: inherit;
+}
+
+.row {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.row button {
+  flex: 1;
+}
+
+/* Array row: count, step and axis share the line, the button keeps its weight. */
+.row.array {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.row.array label {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.row.array input[type="number"] {
+  width: 56px;
+}
+
+.row.array input[type="text"] {
+  flex: 1;
+  min-width: 64px;
+}
+
+.row.array select {
+  width: 52px;
+}
+
+.row.array button {
+  flex: 0 0 auto;
+  padding-inline: 12px;
+}
+
+.verdict {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #1b1d21;
+  border-left: 3px solid var(--dim);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.verdict.pass {
+  border-color: var(--good);
+  color: var(--good);
+}
+
+.verdict.fail {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.detail {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-line;
+  min-height: 28px;
+}
+
+#outliner {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+#outliner li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#outliner li:hover {
+  background: var(--panel-2);
+}
+
+#outliner li.selected {
+  background: #3c3324;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.io {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: auto;
+}
+
+#viewport {
+  position: relative;
+  min-width: 0;
+}
+
+#viewport canvas {
+  display: block;
+}
+
+#hint {
+  position: fixed;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #000a;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--dim);
+  pointer-events: none;
+  font-size: 12px;
+}
+
+footer {
+  color: var(--dim);
+  font-size: 11px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+kbd {
+  background: #1b1d21;
+  border: 1px solid #3a3f46;
+  border-radius: 3px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 10px;
+}

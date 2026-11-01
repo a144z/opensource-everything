@@ -1,0 +1,32 @@
+{
+  "name": "apexus-sketchup",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "FitCheck - the SketchUp-class modeller without the SketchUp licence",
+  "workspaces": [
+    "packages/*",
+    "apps/app",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p packages/geometry --noEmit && tsc -p packages/engine --noEmit && tsc -p packages/kernel --noEmit && tsc -p apps/app --noEmit",
+    "dev": "npm run dev -w @apexus/sketchup-app",
+    "build": "npm run build -w @apexus/sketchup-app",
+    "preview": "npm run preview -w @apexus/sketchup-app",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "manifold-3d": "^3.5.4"
+  }
+}

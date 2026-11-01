@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# PERSONAL / PRIVATE - never published.
+#
+# Everything here is personally sensitive: the code generator, the specs that
+# drive it, and the architecture notes around the whole portfolio. Ignored at
+# the root, re-included nowhere, so no `git add -A` can pick them up.
+# ---------------------------------------------------------------------------
+/blockforge/
+/sketchup/specs/
+/sketchup/.blockforge-*.manifest
+/MASTER.md
+/docs/
+/autocad/
+/shared/
+
+# Belts and braces: any stray copy of a generator, a spec or a private module
+# anywhere in the tree, even if it escapes the rules above.
+_blockforge_*
+.opensource-everything-private
+**/adr/
+**/00-brief.md
+**/01-current-state.md
+**/02-mechanisms.md
+**/03-parity-ladder.md
+**/04-target-architecture.md
+**/05-implementation-plan.md
+**/06-data-model.md
+**/07-fit-check-spec.md
+**/08-ui-spec.md
+**/09-testing.md
+**/10-roadmap.md
+**/11-standards.md
+**/shapegate.py
+**/intentc.py
+**/shapes.py
+**/ir.py
+
+# ...except the one generated module the shipped app imports. Its spec stays
+# private; the emitted table is ordinary product source.
+!/sketchup/packages/engine/src/commands.gen.ts
+
+# Build output and dependencies
+node_modules/
+dist/
+target/
+__pycache__/
+*.pyc
+*.log
+.vite/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem

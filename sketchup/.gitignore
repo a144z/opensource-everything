@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist-types/
+target/
+apps/app/dist/
+*.tsbuildinfo
+.DS_Store

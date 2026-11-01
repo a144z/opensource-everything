@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"FitCheck main window capabilities","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default","fs:allow-read-file","fs:allow-write-file"]}}

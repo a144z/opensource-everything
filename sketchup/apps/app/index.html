@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FitCheck</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="panel">
+        <header>
+          <h1>FitCheck</h1>
+          <span class="ver">L1</span>
+        </header>
+
+        <section class="tools">
+          <button data-tool="select" class="active" title="Select (Space)">Select</button>
+          <button data-tool="rectangle" title="Rectangle (R)">Rectangle</button>
+          <button data-tool="pushpull" title="Push/Pull (P)">Push/Pull</button>
+          <button data-tool="line" title="Line (L)">Line</button>
+          <button data-tool="tape" title="Tape Measure (M)">Tape</button>
+          <button data-tool="dimension" title="Dimension (D)">Dim</button>
+          <button data-tool="followme" title="Follow Me (F)">Follow Me</button>
+          <button data-tool="offset" title="Offset (O)">Offset</button>
+        </section>
+
+        <section class="gizmo">
+          <h2>Transform</h2>
+          <button data-gizmo="translate" class="active" title="Move (G)">Move</button>
+          <button data-gizmo="rotate" title="Rotate (T)">Rotate</button>
+          <button data-gizmo="scale" title="Scale (S)">Scale</button>
+        </section>
+
+        <section class="ops">
+          <h2>Combine</h2>
+          <button id="op-union" title="Union of two selected objects">Union</button>
+          <button id="op-subtract" title="Cut the second selected object out of the first">Subtract</button>
+          <button id="op-intersect" title="Keep only the overlap">Intersect</button>
+          <p class="detail" id="kernel-status">Solid kernel: loading</p>
+        </section>
+
+        <section class="fit">
+          <h2>Fit check</h2>
+          <div id="fit-verdict" class="verdict">No envelope</div>
+          <div class="sizes">
+            <label>W <input id="env-w" type="text" value="600" /> </label>
+            <label>H <input id="env-h" type="text" value="600" /> </label>
+            <label>D <input id="env-d" type="text" value="600" /> </label>
+          </div>
+          <div class="row">
+            <button id="env-set">Set envelope</button>
+            <button id="env-clear">Clear</button>
+            <button id="env-fit" title="Scale the model down until it fits">Fit</button>
+            <button id="env-centre" title="Move the model to the middle of the envelope">Centre</button>
+          </div>
+          <div id="fit-detail" class="detail"></div>
+        </section>
+
+        <section class="scene">
+          <h2>Objects</h2>
+          <ul id="outliner"></ul>
+          <div class="row">
+            <button id="sel-duplicate" title="Copy the selected object">Duplicate</button>
+          </div>
+          <div class="row array">
+            <label for="array-count">Count</label>
+            <input id="array-count" type="number" min="1" max="500" step="1" value="3" />
+            <label for="array-step">Step</label>
+            <input id="array-step" type="text" value="100" title="Distance between copies (600, 60cm, 2m)" />
+            <select id="array-axis" title="Direction of the row">
+              <option value="x">X</option>
+              <option value="y">Y</option>
+              <option value="z" selected>Z</option>
+            </select>
+            <button id="sel-array" title="Repeat the selection along one axis">Array</button>
+          </div>
+        </section>
+
+        <section class="io">
+          <button id="save">Save</button>
+          <button id="open">Open</button>
+          <button id="export">Export STL</button>
+          <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+          <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
+          <button id="zoom" title="Zoom extents (Z)">Zoom</button>
+        </section>
+
+        <footer>
+          <kbd>R</kbd> rect <kbd>P</kbd> pull <kbd>L</kbd> line <kbd>M</kbd> tape <kbd>F</kbd> follow
+          <kbd>O</kbd> offset <kbd>Shift</kbd> axis lock
+          <kbd>G</kbd>/<kbd>T</kbd>/<kbd>S</kbd> move/rotate/scale <kbd>Del</kbd> delete <kbd>Ctrl+Z</kbd>
+        </footer>
+      </aside>
+      <main id="viewport"></main>
+      <div id="hint"></div>
+      <input id="file-input" type="file" accept=".fcproj,application/json" hidden />
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

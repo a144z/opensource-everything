@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/geometry" },
+    { "path": "./packages/engine" },
+    { "path": "./packages/kernel" }
+  ]
+}
