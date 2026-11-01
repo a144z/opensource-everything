@@ -1,0 +1,15 @@
+{
+  "name": "@apexus/cad",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/cad.ts",
+  "types": "src/cad.ts",
+  "exports": {
+    ".": "./src/cad.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run"
+  }
+}

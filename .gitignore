@@ -10,7 +10,6 @@
 /sketchup/.blockforge-*.manifest
 /MASTER.md
 /docs/
-/autocad/
 /shared/
 
 # Belts and braces: any stray copy of a generator, a spec or a private module

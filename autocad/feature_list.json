@@ -1,0 +1,123 @@
+{
+  "project": "DraftCheck (AutoCAD-class) - opensource-everything/autocad",
+  "created_at": "2026-11-01",
+  "note": "Writable field: passes. Do not edit acceptance, description or id to make a check pass - report instead.",
+  "features": [
+    {
+      "id": "H-01",
+      "title": "Build-loop harness",
+      "description": "harness.ps1 with check/verify/report/next/tick/untick, logs under .harness/logs, plus scripts/smoke.mjs driving the engine headless.",
+      "priority": 1,
+      "depends_on": [],
+      "acceptance": [
+        "harness.ps1 verify runs typecheck, vitest and the smoke script and prints one PASS/ERROR line per step",
+        "typecheck uses the same TS version as product 01 (../sketchup/node_modules/.bin/tsc)",
+        "scripts/smoke.mjs runs plain node with no build step and exits non-zero on a broken beat",
+        "harness.ps1 tick/untick change only the passes field of feature_list.json",
+        "harness.ps1 next prints the highest-priority unpassed feature whose dependencies pass"
+      ],
+      "passes": true
+    },
+    {
+      "id": "E-01",
+      "title": "Headless engine core",
+      "description": "packages/cad/src/cad.ts: mm units and expression parsing, Pt maths, line/polyline/circle/arc/spline/text/dimension/hatch/point/leader/insert/section entities, layers, blocks, command + invertible patch undo, drawing and edit commands, picking, snapping.",
+      "priority": 2,
+      "depends_on": [],
+      "acceptance": [
+        "every mutation goes through a Command whose patch is exactly invertible",
+        "undo/redo restores entity and layer state byte for byte",
+        "a zero-length line is refused without touching the document or history",
+        "locked and frozen layers are invisible to picking and selection",
+        "all coordinates in the document are millimetres"
+      ],
+      "passes": true
+    },
+    {
+      "id": "E-02",
+      "title": "Constraint solver and driving dimensions",
+      "description": "projectScene/writeBack/solveDocument/solveAnchor with a damped Newton least-squares solver, constraint catalogue, pinVars, parameter expressions, SOLVE_RESIDUAL_LIMIT, and failure reporting instead of NaN.",
+      "priority": 3,
+      "depends_on": ["E-01"],
+      "acceptance": [
+        "a driving dimension moves free geometry to the parameter value",
+        "an unsatisfiable system reports constraints do not fit and never writes NaN",
+        "a system with no free variables reports failure instead of silently succeeding",
+        "a constraint naming deleted geometry is reported, not thrown",
+        "constraintFromPairs rejects the wrong number of variables",
+        "solver reads live state while Newton is probing, not a stale snapshot"
+      ],
+      "passes": true
+    },
+    {
+      "id": "E-03",
+      "title": "Coverage backed by the suite and smoke",
+      "description": "packages/cad/test/cad.test.ts covers units, geometry, undo, selection, layers, dimensions, expressions, solver, offset, fillet, join, DXF round-trip, project IO, fit, plot and contract; scripts/smoke.mjs drives the same paths headless.",
+      "priority": 4,
+      "depends_on": ["E-01", "E-02"],
+      "acceptance": [
+        "vitest reports every test passing",
+        "typecheck reports no errors under strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes",
+        "smoke covers draw, solve, refused dimension, DXF round-trip, project save/load and a 1:10 plot"
+      ],
+      "passes": true
+    },
+    {
+      "id": "E-04",
+      "title": "DXF and project IO",
+      "description": "writeDxf/readDxf (layers, header vars, units) and the .dwgcad JSON project format with SCHEMA_VERSION and forward-only migrations.",
+      "priority": 5,
+      "depends_on": ["E-01"],
+      "acceptance": [
+        "a drawing round-trips through DXF with entities and layers intact",
+        "a hand-written R12 file is read and what is skipped is reported",
+        "a project file from a newer build is refused with a clear message",
+        "reading and writing never silently drops an entity"
+      ],
+      "passes": true
+    },
+    {
+      "id": "A-01",
+      "title": "App shell",
+      "description": "apps/app: Vite + canvas drafting viewport with pan/zoom, layer panel, command line, snapping toggles, selection set, undo/redo, open/save DXF and project.",
+      "priority": 6,
+      "depends_on": ["E-03", "E-04"],
+      "acceptance": [
+        "the app boots with `npm run dev` and shows an empty drawing at a readable grid",
+        "every engine command reachable from the command line is reachable from a toolbar or menu item",
+        "drawing a line, circle and polyline by click works and snaps to endpoints",
+        "undo/redo in the UI walks the same history as the engine",
+        "the layer panel creates, renames, locks and deletes layers with immediate redraw"
+      ],
+      "passes": false
+    },
+    {
+      "id": "A-02",
+      "title": "Dimension editing in the UI",
+      "description": "Click a driving dimension, type a new value, and the drawing solves live; unsatisfiable edits show the failure and keep the old geometry.",
+      "priority": 7,
+      "depends_on": ["A-01", "E-02"],
+      "acceptance": [
+        "typing a value into a linear dimension moves geometry to exactly that value",
+        "an impossible value shows constraints do not fit and leaves geometry unchanged",
+        "the edit is one undo step",
+        "constraint glyphs are drawn next to the geometry they hold"
+      ],
+      "passes": false
+    },
+    {
+      "id": "A-03",
+      "title": "Sheets and plotting",
+      "description": "Paper space sheets, title block, scale selection and SVG/PDF plot from the same plotTransform the preview uses.",
+      "priority": 8,
+      "depends_on": ["A-01", "E-04"],
+      "acceptance": [
+        "1000 mm at 1:50 plots as exactly 20 mm",
+        "the chosen scale and sheet size appear in the title block",
+        "plot preview matches the exported file",
+        "export works from the desktop build without a browser download prompt"
+      ],
+      "passes": false
+    }
+  ]
+}
