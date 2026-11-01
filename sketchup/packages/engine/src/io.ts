@@ -6,8 +6,8 @@
  * is small and every future feature can re-mesh it.
  */
 
-import type { DocumentState, Envelope, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
-import { SCHEMA_VERSION } from "./types.js";
+import type { DocumentState, Envelope, SectionPlane, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
+import { SCHEMA_VERSION, clampOpacity } from "./types.js";
 import { emptyDocumentState } from "./commands.js";
 
 export interface SerializedSolid {
@@ -22,6 +22,7 @@ export interface SerializedDocument {
   readonly units: "mm";
   readonly envelope: Envelope | null;
   readonly solids: readonly SerializedSolid[];
+  readonly section: SectionPlane | null;
 }
 
 export function serialize(doc: DocumentState): SerializedDocument {
@@ -30,6 +31,7 @@ export function serialize(doc: DocumentState): SerializedDocument {
     units: "mm",
     envelope: doc.envelope,
     solids: [...doc.solids.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    section: doc.section,
   };
 }
 
@@ -41,11 +43,17 @@ type Raw = Record<string, unknown>;
 type Upgrader = (raw: Raw) => Raw;
 
 /**
- * Migration chain. v1 is schema 1 (recipes carry no matrix; `matrix` was added
- * to the recipe type after 1 shipped, so a 1-file simply defaults to identity).
- * Add `2: ...` here and raise SCHEMA_VERSION when the format next changes.
+ * Migration chain. 1 is the first shipped schema (recipes carry no matrix;
+ * `matrix` was added after 1 shipped, so a 1-file simply defaults to identity).
+ * Add an entry here and raise SCHEMA_VERSION when the format next changes.
+ *
+ * 1 -> 2: added `meta.opacity`, `meta.tag` and top-level `section`. Every new
+ * field is optional on read with a default that reproduces 1-file behaviour
+ * (opaque, untagged, no cut), so the step only marks the file as understood.
  */
-const MIGRATIONS: Record<number, Upgrader> = {};
+const MIGRATIONS: Record<number, Upgrader> = {
+  1: (raw) => ({ ...raw, schemaVersion: 2 }),
+};
 
 export function deserialize(raw: unknown): DocumentState {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -79,6 +87,8 @@ export function deserialize(raw: unknown): DocumentState {
         color: typeof s.meta?.color === "string" ? s.meta.color : "#e8b04b",
         hidden: s.meta?.hidden === true,
         locked: s.meta?.locked === true,
+        opacity: clampOpacity(s.meta?.opacity),
+        tag: typeof s.meta?.tag === "string" ? s.meta.tag : "",
       },
     });
   }
@@ -98,7 +108,20 @@ export function deserialize(raw: unknown): DocumentState {
     );
     if (!ok) throw new Error("envelope has invalid bounds");
   }
-  return { ...doc, envelope, solids };
+  const section = readSection(data["section"]);
+  return { ...doc, envelope, solids, section };
+}
+
+/** A section saved by another build may be absent (old file) or junk (never). */
+function readSection(raw: unknown): SectionPlane | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") throw new Error("section must be an object or null");
+  const s = raw as Record<string, unknown>;
+  const axis = s["axis"];
+  if (axis !== "x" && axis !== "y" && axis !== "z") throw new Error("section axis must be x, y or z");
+  const offset = s["offset"];
+  if (typeof offset !== "number" || !Number.isFinite(offset)) throw new Error("section offset must be a finite number");
+  return { axis, offset, flip: s["flip"] === true };
 }
 
 export function deserializeJson(text: string): DocumentState {

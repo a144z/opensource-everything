@@ -20,14 +20,14 @@ import {
   withScale,
   withTranslation,
 } from "./math.js";
-import type { BooleanOp, DocumentState, Envelope, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
-import { DEFAULT_COLORS, SCHEMA_VERSION } from "./types.js";
+import type { BooleanOp, DocumentState, Envelope, SectionPlane, Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
+import { DEFAULT_COLORS, SCHEMA_VERSION, clampOpacity } from "./types.js";
 import { validateRecipe as normaliseRecipe } from "./io.js";
 
 export type Resolve = (recipe: SolidRecipe) => MeshData;
 
 export function emptyDocumentState(): DocumentState {
-  return { schemaVersion: SCHEMA_VERSION, units: "mm", envelope: null, solids: new Map() };
+  return { schemaVersion: SCHEMA_VERSION, units: "mm", envelope: null, solids: new Map(), section: null };
 }
 
 export function labelFor(recipe: SolidRecipe): string {
@@ -67,6 +67,8 @@ export function newMeta(doc: DocumentState, recipe: SolidRecipe, meta?: Partial<
     color: meta?.color ?? DEFAULT_COLORS[count % DEFAULT_COLORS.length]!,
     hidden: meta?.hidden ?? false,
     locked: meta?.locked ?? false,
+    opacity: clampOpacity(meta?.opacity),
+    tag: meta?.tag ?? "",
   };
 }
 
@@ -429,8 +431,7 @@ export function setMeta(id: SolidId, patch: Partial<SolidMeta>, label = "Edit"):
   };
 }
 
-export function setColor(ids: readonly SolidId[], color: string): Command {
-  return {
+export function setColor(ids: readonly SolidId[], color: string): Command {  return {
     kind: "setColor",
     label: "Colour",
     apply(doc) {
@@ -447,8 +448,124 @@ export function setColor(ids: readonly SolidId[], color: string): Command {
   };
 }
 
-/** Set or clear the fit envelope. Setting one is not a geometry change. */
-export function setEnvelope(envelope: Envelope | null): Command {
+/* ------------------------------------------------------------------ tags */
+
+/**
+ * Put objects on a tag (SketchUp's "layer"). A tag is a name only: it never
+ * owns geometry, so this is a meta edit and undo is a plain restore.
+ */
+export function setTag(ids: readonly SolidId[], tag: string): Command {
+  const name = tag.trim();
+  if (name.length > 40) throw new RangeError("a tag name is at most 40 characters");
+  const label = name === "" ? "Clear tag" : `Tag: ${name}`;
+  return {
+    kind: "setTag",
+    label,
+    apply(doc) {
+      const forward = new Map<SolidId, Solid | null>();
+      const backward = new Map<SolidId, Solid | null>();
+      for (const id of ids) {
+        const prev = doc.solids.get(id);
+        if (!prev) continue;
+        forward.set(id, { ...prev, revision: prev.revision + 1, meta: { ...prev.meta, tag: name } });
+        backward.set(id, prev);
+      }
+      return patchOf(doc, forward, backward, label);
+    },
+  };
+}
+
+/**
+ * Show or hide a whole tag. Visibility lives in each solid's meta (not in a
+ * tag table) so a project file needs no second source of truth: hiding a tag
+ * is exactly setting `hidden` on every object wearing it, one undo step.
+ */
+export function setTagVisible(tag: string, visible: boolean): Command {
+  const name = tag.trim();
+  const label = `${visible ? "Show" : "Hide"} tag ${name}`;
+  return {
+    kind: "setTagVisible",
+    label,
+    apply(doc) {
+      const forward = new Map<SolidId, Solid | null>();
+      const backward = new Map<SolidId, Solid | null>();
+      for (const solid of doc.solids.values()) {
+        if (solid.meta.tag !== name || solid.meta.hidden === !visible) continue;
+        forward.set(solid.id, { ...solid, revision: solid.revision + 1, meta: { ...solid.meta, hidden: !visible } });
+        backward.set(solid.id, solid);
+      }
+      return patchOf(doc, forward, backward, label);
+    },
+  };
+}
+
+/** Every tag in use, sorted, with how many visible and hidden objects wear it. */
+export function tagsInUse(doc: DocumentState): { tag: string; total: number; hidden: number }[] {
+  const counts = new Map<string, { total: number; hidden: number }>();
+  for (const solid of doc.solids.values()) {
+    const tag = solid.meta.tag;
+    if (tag === "") continue;
+    const row = counts.get(tag) ?? { total: 0, hidden: 0 };
+    row.total += 1;
+    if (solid.meta.hidden) row.hidden += 1;
+    counts.set(tag, row);
+  }
+  return [...counts.entries()]
+    .map(([tag, row]) => ({ tag, ...row }))
+    .sort((a, b) => a.tag.localeCompare(b.tag));
+}
+
+export function setOpacity(ids: readonly SolidId[], opacity: number): Command {
+  if (typeof opacity !== "number" || !Number.isFinite(opacity)) {
+    throw new RangeError("opacity must be a number from 0 to 1");
+  }
+  const value = clampOpacity(opacity);
+  return {
+    kind: "setOpacity",
+    label: value === 1 ? "Make opaque" : `Opacity ${Math.round(value * 100)}%`,
+    apply(doc) {
+      const forward = new Map<SolidId, Solid | null>();
+      const backward = new Map<SolidId, Solid | null>();
+      for (const id of ids) {
+        const prev = doc.solids.get(id);
+        if (!prev) continue;
+        forward.set(id, { ...prev, revision: prev.revision + 1, meta: { ...prev.meta, opacity: value } });
+        backward.set(id, prev);
+      }
+      return patchOf(doc, forward, backward, "Opacity");
+    },
+  };
+}
+
+/* --------------------------------------------------------------- sections */
+
+/** A section plane: everything on the +side of `offset` along `axis` is hidden. */
+export function setSection(plane: SectionPlane | null): Command {
+  // Validate at construction: a NaN offset is a caller's bug, and it must fail
+  // where the caller can see it, not halfway through an undo transaction.
+  if (plane) {
+    if (!Number.isFinite(plane.offset)) throw new RangeError("a section plane needs a finite position");
+    if (!["x", "y", "z"].includes(plane.axis)) throw new RangeError("section axis must be x, y or z");
+  }
+  const label = plane ? `Section ${plane.axis.toUpperCase()} at ${Math.round(plane.offset)} mm` : "Clear section";
+  return {
+    kind: "setSection",
+    label,
+    apply(doc) {
+      return {
+        forward: new Map(),
+        backward: new Map(),
+        envelopeBefore: doc.envelope,
+        envelopeAfter: doc.envelope,
+        label,
+        sectionBefore: doc.section,
+        sectionAfter: plane,
+      };
+    },
+  };
+}
+
+/** Set or clear the fit envelope. Setting one is not a geometry change. */export function setEnvelope(envelope: Envelope | null): Command {
   const label = envelope ? "Set fit envelope" : "Clear fit envelope";
   return {
     kind: "setEnvelope",

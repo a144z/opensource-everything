@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SCHEMA_VERSION,
   Session,
   addSolid,
   analyzeSolid,
@@ -26,7 +27,9 @@ describe("document", () => {
     const doc = emptyDocument();
     expect(doc.solids.size).toBe(0);
     expect(doc.envelope).toBeNull();
-    expect(doc.schemaVersion).toBe(1);
+    expect(doc.section).toBeNull();
+    expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe(2); // bump this test only with a real migration
   });
 });
 

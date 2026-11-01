@@ -1,6 +1,6 @@
 /** History: invertible patches and the undo/redo stacks (ADR 0003). */
 
-import type { DocumentState, Envelope, Solid, SolidId } from "./types.js";
+import type { DocumentState, Envelope, SectionPlane, Solid, SolidId } from "./types.js";
 
 export interface Patch {
   readonly forward: ReadonlyMap<SolidId, Solid | null>;
@@ -8,6 +8,9 @@ export interface Patch {
   readonly envelopeBefore: Envelope | null;
   readonly envelopeAfter: Envelope | null;
   readonly label: string;
+  /** Section plane before/after; undefined means "unchanged". */
+  readonly sectionBefore?: SectionPlane | null;
+  readonly sectionAfter?: SectionPlane | null;
 }
 
 export function applyPatch(
@@ -17,13 +20,15 @@ export function applyPatch(
 ): DocumentState {
   const map = direction === "forward" ? patch.forward : patch.backward;
   const envelope = direction === "forward" ? patch.envelopeAfter : patch.envelopeBefore;
-  if (map.size === 0 && envelope === doc.envelope) return doc;
+  const section = direction === "forward" ? patch.sectionAfter : patch.sectionBefore;
+  const nextSection = section === undefined ? doc.section : section;
+  if (map.size === 0 && envelope === doc.envelope && nextSection === doc.section) return doc;
   const solids = new Map(doc.solids);
   for (const [id, solid] of map) {
     if (solid === null) solids.delete(id);
     else solids.set(id, solid);
   }
-  return { schemaVersion: doc.schemaVersion, units: doc.units, envelope, solids };
+  return { schemaVersion: doc.schemaVersion, units: doc.units, envelope, solids, section: nextSection };
 }
 
 export interface HistoryEntry {

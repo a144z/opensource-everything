@@ -132,7 +132,60 @@ button.active {
   flex-wrap: wrap;
 }
 
-.row.array label {
+.row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.row input[type="text"],
+.row select {
+  min-width: 0;
+  background: #1b1d21;
+  border: 1px solid #3a3f46;
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+  font: inherit;
+}
+
+/* Tag list: name, count, show/hide. Same shape as the outliner on purpose. */
+#tags {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 110px;
+  overflow-y: auto;
+}
+
+#tags li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#tags li:hover {
+  background: var(--panel-2);
+}
+
+#tags li .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#tags li .count {
+  color: var(--dim);
+  font-size: 10px;
+}
+
+#tags li.none {
+  color: var(--dim);
+  cursor: default;
+}.row.array label {
   font-size: 11px;
   opacity: 0.75;
 }

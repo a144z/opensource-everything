@@ -66,6 +66,8 @@
           <ul id="outliner"></ul>
           <div class="row">
             <button id="sel-duplicate" title="Copy the selected object">Duplicate</button>
+            <label for="opacity" title="Fade the selection to see through it">Opacity</label>
+            <input id="opacity" type="range" min="10" max="100" step="5" value="100" />
           </div>
           <div class="row array">
             <label for="array-count">Count</label>
@@ -78,6 +80,29 @@
               <option value="z" selected>Z</option>
             </select>
             <button id="sel-array" title="Repeat the selection along one axis">Array</button>
+          </div>
+        </section>
+
+        <section class="tags">
+          <h2>Tags</h2>
+          <ul id="tags"></ul>
+          <div class="row">
+            <input id="tag-name" type="text" maxlength="40" placeholder="New tag for the selection" />
+            <button id="tag-apply" title="Put the selection on this tag">Tag</button>
+          </div>
+        </section>
+
+        <section class="section">
+          <h2>Section</h2>
+          <div class="row">
+            <select id="section-axis" title="Cut direction">
+              <option value="x">X</option>
+              <option value="y">Y</option>
+              <option value="z" selected>Z</option>
+            </select>
+            <input id="section-at" type="text" value="0" title="Where to cut (600, 60cm, 2m)" />
+            <button id="section-apply" title="Cut the model at this plane">Cut</button>
+            <button id="section-clear" title="Remove the cut">Clear</button>
           </div>
         </section>
 

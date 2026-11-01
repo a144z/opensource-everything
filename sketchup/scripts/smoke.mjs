@@ -145,6 +145,27 @@ try {
   );
   checks.push(["controls present", buttons >= 15, `${buttons} buttons`]);
 
+  // New panes must exist and start quiet: an empty tag list, no section, a
+  // palette that is closed until asked for.
+  const ui = await evaluate(
+    api,
+    `(() => {
+      const q = (s) => document.querySelector(s);
+      return {
+        tags: q('#tags')?.textContent?.trim() ?? 'missing',
+        opacity: q('#opacity')?.disabled ?? false,
+        palette: q('#palette')?.hidden ?? false,
+        marquee: q('#viewport #marquee') !== null,
+        section: q('#section-apply') !== null,
+      };
+    })()`,
+  );
+  checks.push(["tag list rendered", ui.tags.length > 0, ui.tags]);
+  checks.push(["opacity starts disabled", ui.opacity === true, String(ui.opacity)]);
+  checks.push(["palette starts closed", ui.palette === true, String(ui.palette)]);
+  checks.push(["marquee overlay exists", ui.marquee === true, String(ui.marquee)]);
+  checks.push(["section controls exist", ui.section === true, String(ui.section)]);
+
   for (const [name, pass, detail] of checks) {
     console.log(`${pass ? "PASS" : "FAIL"}  ${name}${pass ? "" : `  -> ${detail}`}`);
     if (!pass) problems.push(`${name}: ${detail}`);

@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -72,6 +72,20 @@ export interface SolidMeta {
   readonly color: string;
   readonly hidden: boolean;
   readonly locked: boolean;
+  /** 0 (invisible) to 1 (opaque). Tagged geometry is drawn translucent. */
+  readonly opacity: number;
+  /**
+   * The tag (SketchUp calls it a layer). Tags never group geometry — deleting a
+   * tag is not a geometry change — they only name a set of objects that share
+   * visibility, which is why this is a plain string and not a parent id.
+   */
+  readonly tag: string;
+}
+
+/** Opacity the user cannot meaningfully see; clamping keeps saves honest. */
+export function clampOpacity(value: unknown, fallback = 1): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
 }
 
 export interface Solid {
@@ -86,11 +100,22 @@ export interface Envelope {
   readonly max: Vec3;
 }
 
+/** A cut through the whole model; see `setSection` in commands.ts. */
+export interface SectionPlane {
+  readonly axis: "x" | "y" | "z";
+  /** Position along the axis, in mm. */
+  readonly offset: number;
+  /** True removes the positive side of the axis, false the negative side. */
+  readonly flip: boolean;
+}
+
 export interface DocumentState {
   readonly schemaVersion: number;
   readonly units: "mm";
   readonly envelope: Envelope | null;
   readonly solids: ReadonlyMap<SolidId, Solid>;
+  /** Active section plane, or null. A view setting that is still saved. */
+  readonly section: SectionPlane | null;
 }
 
 export const DEFAULT_COLORS = [

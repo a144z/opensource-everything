@@ -21,6 +21,11 @@ import {
   setEnvelope,
   setMatrix,
   setMeta,
+  setOpacity,
+  setSection,
+  setTag,
+  setTagVisible,
+  tagsInUse,
   type CommandId,
   type FitResult,
   type Solid,
@@ -362,6 +367,12 @@ function renderFit(fit: FitResult): void {
       detail.textContent += `\n${solid.meta.name}: ${(b.max[0] - b.min[0]).toFixed(1)} x ${(b.max[1] - b.min[1]).toFixed(1)} x ${(b.max[2] - b.min[2]).toFixed(1)} mm`;
     }
   }
+  // The opacity slider follows the selection, so it never claims a value the
+  // selected object does not have.
+  const slider = $("opacity") as HTMLInputElement;
+  const first = sel ? session.document.solids.get(sel) : undefined;
+  slider.value = String(Math.round((first?.meta.opacity ?? 1) * 100));
+  slider.disabled = selection.size === 0;
 }
 
 function boundsLine(fit: FitResult): string {
@@ -443,6 +454,47 @@ function openProject(file: File): void {
 function refresh(): void {
   view.sync();
   renderPanel();
+  renderTags();
+}
+
+/** Rebuild the tag list: one row per tag, with show/hide and a count. */
+function renderTags(): void {
+  const list = $("tags");
+  const rows = tagsInUse(session.document);
+  // A tag with no members is invisible to `tagsInUse`, so the name in the box
+  // is shown as a zero-object row: the user's own entry is never lost.
+  const pending = ($("tag-name") as HTMLInputElement).value.trim();
+  if (pending !== "" && !rows.some((r) => r.tag === pending)) rows.push({ tag: pending, total: 0, hidden: 0 });
+  list.replaceChildren(
+    ...rows.map((row) => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = row.tag;
+      name.title = `${row.total} object(s), ${row.hidden} hidden`;
+      const count = document.createElement("span");
+      count.className = "count";
+      count.textContent = row.hidden === 0 ? `${row.total}` : `${row.total} (${row.hidden} hidden)`;
+      const toggle = iconButton(row.hidden === row.total ? "Show tag" : "Hide tag", row.hidden === row.total ? "+" : "-", () =>
+        quietly(
+          () => session.execute(setTagVisible(row.tag, row.hidden === row.total)),
+          row.hidden === row.total ? `Tag "${row.tag}" shown.` : `Tag "${row.tag}" hidden.`,
+        ),
+      );
+      li.append(name, count, toggle);
+      li.addEventListener("click", () => {
+        const ids = [...session.document.solids.values()].filter((s) => s.meta.tag === row.tag).map((s) => s.id);
+        setSelection(ids);
+      });
+      return li;
+    }),
+  );
+  if (rows.length === 0) {
+    const li = document.createElement("li");
+    li.className = "none";
+    li.textContent = "No tags yet";
+    list.append(li);
+  }
 }
 
 /**
@@ -612,6 +664,41 @@ $("env-centre").addEventListener("click", () => {
   }
   refresh();
 });
+
+$("opacity").addEventListener("change", () => {
+  const ids = [...selection];
+  if (ids.length === 0) {
+    hint.textContent = "Opacity: select something first.";
+    return;
+  }
+  const percent = Number(($("opacity") as HTMLInputElement).value);
+  quietly(() => session.execute(setOpacity(ids, percent / 100)), `Opacity ${percent}%.`);
+});
+
+$("tag-apply").addEventListener("click", () => {
+  const ids = [...selection];
+  if (ids.length === 0) {
+    hint.textContent = "Tag: select something first.";
+    return;
+  }
+  const name = ($("tag-name") as HTMLInputElement).value.trim();
+  quietly(() => session.execute(setTag(ids, name)), name === "" ? "Tag cleared." : `Tagged "${name}".`);
+});
+
+$("section-apply").addEventListener("click", () => {
+  const axis = ($("section-axis") as HTMLSelectElement).value as "x" | "y" | "z";
+  const at = parseLength(($("section-at") as HTMLInputElement).value, unit);
+  if (!at) {
+    hint.textContent = "Section: the cut position must be a length (e.g. 0, 30cm, 2in).";
+    return;
+  }
+  quietly(
+    () => session.execute(setSection({ axis, offset: at.mm, flip: false })),
+    `Cut at ${axis.toUpperCase()} = ${formatLength(at.mm, unit)}.`,
+  );
+});
+
+$("section-clear").addEventListener("click", () => quietly(() => session.execute(setSection(null)), "Section cleared."));
 
 for (const [button, command] of [
   ["op-union", "union"],

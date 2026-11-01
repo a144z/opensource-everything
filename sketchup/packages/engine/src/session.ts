@@ -214,7 +214,15 @@ export class Session {
       forward.set(id, after);
       backward.set(id, before);
     }
-    const patch: Patch = { forward, backward, envelopeBefore, envelopeAfter: working.envelope, label };
+    const patch: Patch = {
+      forward,
+      backward,
+      envelopeBefore,
+      envelopeAfter: working.envelope,
+      label,
+      sectionBefore: this.#doc.section,
+      sectionAfter: working.section,
+    };
     this.#counter = counter;
     this.#doc = working;
     this.#history.push({ label, patch });

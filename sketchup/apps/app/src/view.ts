@@ -130,6 +130,7 @@ export class View {
     const { grid, axes } = this.#buildEnvironment();
     this.grid = grid;
     this.axes = axes;
+    this.#applySection();
 
     this.#resizeObserver = new ResizeObserver(() => this.#resize(container));
     this.#resizeObserver.observe(container);
@@ -291,6 +292,7 @@ export class View {
   /** Full reconcile: build, rebuild or dispose every mesh. Used on undo/redo/load. */
   sync(): void {
     this.syncPatches([...this.#session.document.solids.keys()], new Set());
+    this.#applySection();
   }
 
   /** Reconcile only `touched`; `removed` are ids the patch deleted. */
@@ -344,10 +346,40 @@ export class View {
     this.#dirty = true;
   }
 
-  #applyMeta(c: CachedMesh, solid: Solid): void {
-    c.mesh.name = solid.meta.name;
+  /* --------------------------------------------------------------- section */
+
+  /**
+   * Show the document's section cut. Three.js clips in world space, so one
+   * plane per axis is created once and only the active one is attached; the
+   * flipped side is achieved by negating the normal, not by moving the plane.
+   */
+  #applySection(): void {
+    const section = this.#session.document.section;
+    const planes: THREE.Plane[] = [];
+    if (section) {
+      const normal = new THREE.Vector3(0, 0, 0);
+      const component = section.axis === "x" ? "x" : section.axis === "y" ? "y" : "z";
+      normal[component] = section.flip ? 1 : -1;
+      planes.push(new THREE.Plane(normal, section.flip ? -section.offset : section.offset));
+    }
+    this.renderer.clippingPlanes = planes;
+    // The shadow map ignores clipping planes unless this is on, which would
+    // leave a full-length shadow for half a model.
+    this.renderer.localClippingEnabled = section !== null;
+    this.#dirty = true;
+  }
+
+  #applyMeta(c: CachedMesh, solid: Solid): void {    c.mesh.name = solid.meta.name;
     c.baseColor.set(solid.meta.color);
-    (c.mesh.material as THREE.MeshStandardMaterial).color.copy(c.baseColor);
+    const mat = c.mesh.material as THREE.MeshStandardMaterial;
+    mat.color.copy(c.baseColor);
+    // Translucent geometry must not write depth, or it hides the edges of
+    // whatever sits behind it and looks like a hole rather than glass.
+    const opaque = solid.meta.opacity >= 1;
+    mat.transparent = !opaque;
+    mat.opacity = solid.meta.opacity;
+    mat.depthWrite = opaque;
+    c.mesh.castShadow = opaque;
     c.mesh.visible = !solid.meta.hidden;
     c.edges.visible = !solid.meta.hidden;
   }
