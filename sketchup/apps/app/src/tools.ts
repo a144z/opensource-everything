@@ -12,6 +12,7 @@ import {
 } from "@apexus/geometry";
 import { formatLengthIn } from "./display.js";
 import {
+  addEdges as addEdgesCmd,
   addFace as addFaceCmd,
   addSolid as addSolidCmd,
   angleFromText,
@@ -114,7 +115,19 @@ type Pending =
       current: Vec3;
       typed: number | null;
     }
-  | { readonly kind: "line"; readonly from: Vec3; readonly planeNormal: Vec3; current: Vec3 }
+  | {
+      /**
+       * Line: a chain of clicked points on one plane. `points` holds every click
+       * that stays, so Backspace can drop the last one without throwing the
+       * whole chain away; `current` is where the next segment would end.
+       */
+      readonly kind: "line";
+      /** The far end of the chain so far: where the next segment starts. */
+      from: Vec3;
+      readonly planeNormal: Vec3;
+      readonly points: Vec3[];
+      current: Vec3;
+    }
   | {
       /** Dimension: a persistent annotation between two points, not geometry. */
       readonly kind: "dimension";
@@ -243,6 +256,16 @@ export class ToolController {
     return this.#pending !== null;
   }
 
+  /** The digits typed so far, for tests and the status line's own reading. */
+  get typedText(): string {
+    return this.#typed;
+  }
+
+  /** How many points the live line chain holds; 0 when there is no chain. */
+  get chainLength(): number {
+    return this.#pending?.kind === "line" ? this.#pending.points.length : 0;
+  }
+
   setTool(tool: Tool): void {
     this.#cancel();
     this.#tool = tool;
@@ -334,6 +357,12 @@ export class ToolController {
       this.#applyTyped();
       return true;
     }
+    if (key === "Enter" && !this.#typed && this.#pending?.kind === "line") {
+      // Enter with nothing typed ends the chain where it stands: an open run of
+      // edges, not a face, which is what SketchUp does.
+      this.#finishLine(this.#pending, false);
+      return true;
+    }
     if (key === "Enter" && this.#typed) {
       // The size path clears its own text: it has just built the face, so a
       // stale "600,400" must not be re-applied to the next rectangle.
@@ -345,6 +374,23 @@ export class ToolController {
     if (key === "Backspace" && this.#typed) {
       this.#typed = this.#typed.slice(0, -1);
       this.#applyTyped();
+      return true;
+    }
+    // A line chain has no digits in play once the last one has been placed, so
+    // Backspace means the thing SketchUp means by Undo here: step back one
+    // point. A chain of two would leave a single click, which is no line.
+    if (key === "Backspace" && this.#pending?.kind === "line") {
+      const p = this.#pending;
+      if (p.points.length < 2) {
+        this.#cancel();
+        this.#host.setHint(HINTS.line);
+        return true;
+      }
+      const dropped = p.points.pop()!;
+      p.from = dropped;
+      p.current = dropped;
+      this.#drawChain(p.points, dropped);
+      this.#host.setHint("Point removed.");
       return true;
     }
     return false;
@@ -441,6 +487,38 @@ export class ToolController {
     // `600,400` is read before the single-length path would refuse it.
     // `pair` already implied `kind === "rect"`; the narrowing is restated here
     // because this.#typedSize() is a method call, which TS cannot narrow through.
+    // A line chain takes one length: it places the next point that far along
+    // the direction the cursor already set, which is how a wall gets an exact
+    // length without a steady hand.
+    const line = p?.kind === "line" ? p : null;
+    if (line && parsed) {
+      // The cursor sets the direction, but it may still sit exactly on the last
+      // placed point (a click and a type with no move between them). Then the
+      // last segment is the direction: typing 500 after a 1 m wall carries on
+      // straight, which is how a run of equal bays gets drawn.
+      const cursor = sub3(line.current, line.from);
+      const last = line.points.length >= 2 ? sub3(line.from, line.points[line.points.length - 2]!) : cursor;
+      const known = Math.hypot(cursor[0], cursor[1], cursor[2]) > 1e-6 ? cursor : last;
+      // With nothing to go on yet, the red axis is where a typed first segment
+      // goes: the inference engine would have drawn that line under the cursor,
+      // and a length still has to mean a place.
+      const dir = Math.hypot(known[0], known[1], known[2]) > 1e-6 ? known : ([1, 0, 0] as Vec3);
+      const len = Math.hypot(dir[0], dir[1], dir[2]);
+      if (len > 1e-6) {
+        const scale = parsed.mm / len;
+        const placed: Vec3 = [
+          line.from[0] + dir[0] * scale,
+          line.from[1] + dir[1] * scale,
+          line.from[2] + dir[2] * scale,
+        ];
+        if (commit) this.#placeLinePoint(placed);
+        else {
+          this.#drawChain(line.points, placed);
+          this.#measure = lengthValue("Line", parsed.mm, this.#host.unit(), "Enter to place", "typed");
+        }
+        return;
+      }
+    }
     const rect = p?.kind === "rect" ? p : null;
     const pair = rect ? this.#typedSize() : null;
     if (pair && rect) {
@@ -540,7 +618,9 @@ export class ToolController {
     if (commit) {
       if (p.kind === "pull") this.#commitPull(p, parsed ? parsed.mm : 0);
       else if (p.kind === "rect") this.#commitRect(p);
-      else if (p.kind === "line") this.#commitLine(p);
+      // A typed length was already applied above through `#applyTyped`; with
+      // no digits in play Enter ends the chain.
+      else if (p.kind === "line") this.#finishLine(p, p.points.length >= 3 && distance(p.current, p.points[0]!) < CLOSE_MM);
       else if (p.kind === "offset") this.#commitOffset(p);
       else if (p.kind === "tape") this.#commitTape(p);
     }
@@ -583,7 +663,33 @@ export class ToolController {
       this.#host.setHint("Esc cancels");
     } else if (p?.kind === "pull") {
       this.drag(clientX, clientY);
-    } else if (p?.kind === "line" || p?.kind === "tape" || p?.kind === "dimension") {      const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
+    } else if (p?.kind === "line") {
+      // Every segment so far plus the one under the cursor: a chain that only
+      // showed its last edge would give no sense of the outline being drawn.
+      // The caller's 3D hover point wins: a snap already found the vertex, and
+      // re-projecting the raw pixel would throw that candidate away.
+      const pt = point ?? this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
+      if (!pt) return;
+      const snapped = this.#snap(pt);
+      const to = this.#constrain(p.from, snapped.point);
+      p.current = to;
+      this.#drawChain(p.points, to);
+      // Typed text wins over the cursor, the same rule every other tool uses.
+      const typed = this.#typed ? parseLength(this.#typed, this.#host.unit())?.mm ?? null : null;
+      this.#measure = lengthValue(
+        "Line",
+        typed ?? distance(p.from, to),
+        this.#host.unit(),
+        typed ? "Enter to place" : `${this.#glyphHint()} click to place, on the start point to close`.trim(),
+        typed ? "typed" : "proposed",
+      );
+      this.#host.setHint(
+        p.points.length >= 2
+          ? "Esc cancels, Backspace steps back, Enter finishes the chain"
+          : "Esc cancels, Backspace steps back",
+      );
+    } else if (p?.kind === "tape" || p?.kind === "dimension") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
       if (!pt) return;
       const snapped = this.#snap(pt);
       const to = this.#constrain(p.from, snapped.point);
@@ -991,41 +1097,78 @@ export class ToolController {
   #clickLine(hit: PickHit, clientX: number, clientY: number): void {
     const p = this.#pending;
     if (p?.kind === "line") {
-      this.#commitLine(p);
+      // Close on the first point, SketchUp's oldest gesture: the loop becomes a
+      // face, ready to push/pull. It is the *chain's start* that closes the ring,
+      // not the tail the last segment grew from.
+      const start = p.points[0]!;
+      if (p.points.length >= 3 && distance(p.current, start) < CLOSE_MM) {
+        this.#finishLine(p, true);
+        return;
+      }
+      this.#placeLinePoint(p.current);
       return;
     }
-    const from = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
-    if (!from) return;
-    this.#pending = { kind: "line", from: this.#snap(from).point, planeNormal: [0, 0, 1], current: from };
-    this.#host.setHint(`Line: click the end point${this.#glyphHint()} (type a length, Esc cancels)`);
+    const raw = hit.kind === "ground" ? hit.point : this.#host.view.groundPoint(clientX, clientY);
+    if (!raw) return;
+    const from = this.#snap(raw).point;
+    this.#pending = { kind: "line", from, planeNormal: [0, 0, 1], points: [from], current: from };
+    this.#host.setHint(`Line: click the next point${this.#glyphHint()} (type a length, Esc cancels)`);
   }
 
-  #commitLine(p: Extract<Pending, { kind: "line" }>): void {
+  /** Append a point to the live chain and keep the next segment attached to it. */
+  #placeLinePoint(to: Vec3): void {
+    const p = this.#pending;
+    if (p?.kind !== "line") return;
+    if (distance(p.from, to) < 0.5) return;
+    p.points.push(to);
+    p.from = to;
+    p.current = to;
+    this.#typed = "";
+    this.#drawChain(p.points, to);
+    this.#host.setHint(
+      p.points.length >= 3
+        ? "Click the start point to close into a face, Enter to finish, Esc cancels"
+        : "Line: click the next point",
+    );
+  }
+
+  /** The whole chain as one object: one undo step for a drawn outline. */
+  #finishLine(p: Extract<Pending, { kind: "line" }>, close: boolean): void {
+    const ring: Vec2[] = p.points.map((pt) => [pt[0], pt[1]]);
     this.#cancel();
-    const a: Vec2 = [p.from[0], p.from[1]];
-    const b: Vec2 = [p.current[0], p.current[1]];
-    const length = distance2(a, b);
-    if (length < 0.5) return;
-    // A guide line: stored as a zero-thickness extrude so it can be offset or
-    // followed later, and it never joins the solids the fit check measures.
+    if (ring.length < 2) return;
+    const total = polylineLength(ring);
+    if (total < 0.5) return;
     try {
-      this.#host.session.execute(
-        addSolidCmd(
-          {
-            kind: "extrude",
-            profile: { width: length, height: LINE_GUIDE_WIDTH },
-            normal: [0, 0, 1],
-            origin: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), 0],
-            distance: 0.1,
-            matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-          },
-          { name: `Guide ${fmt(length)}`, color: "#5b7083" },
-        ),
+      // Closing and drawing are one command each, so the chain is one object and
+      // one undo step: SketchUp removes a whole drawn loop with one Ctrl+Z.
+      const command = close
+        ? addFaceCmd(counterClockwise(ring), GROUND_PLANE, { name: `Face ${fmt(total)}` })
+        : addEdgesCmd(ring, GROUND_PLANE, { name: `Edges ${fmt(total)}` });
+      const patch = this.#host.session.execute(command);
+      const added = [...patch.forward.keys()][0];
+      if (added) {
+        this.#lastPullId = added;
+        this.#host.select([added]);
+      }
+      this.#host.setHint(
+        close
+          ? `Closed loop (${formatLengthIn(this.#host.unit(), total)}): push/pull to give it height.`
+          : `Edges drawn (${formatLengthIn(this.#host.unit(), total)}).`,
       );
-      this.#host.setHint(`Line ${formatLengthIn(this.#host.unit(), length)} drawn.`);
     } catch (err) {
       this.#host.setHint((err as Error).message);
     }
+  }
+
+  /** Preview the chain, including the segment under the cursor. */
+  #drawChain(points: readonly Vec3[], cursor: Vec3): void {
+    const all = [...points, cursor];
+    if (all.length < 2) {
+      this.#clearPreview();
+      return;
+    }
+    this.#setPreview(all.map((pt) => new THREE.Vector3(pt[0], pt[1], pt[2])));
   }
 
   /* ----------------------------------------------------------------- tape */
@@ -1511,8 +1654,8 @@ const GRID_MM = 10;
 const GLOSSARY_UP: Vec3 = [0, 0, 1];
 /** The ground plane a tool-drawn face lies in; faces carry no matrix of their own. */
 const GROUND_PLANE: { readonly origin: Vec3; readonly normal: Vec3 } = { origin: [0, 0, 0], normal: GLOSSARY_UP };
-/** Height of a guide line's band, small enough to read as a line not a solid. */
-const LINE_GUIDE_WIDTH = 0.5;
+/** How near the start point a click counts as closing the loop (one pixel of slop). */
+const CLOSE_MM = 2;
 
 function makeDashedLine(color: number): THREE.Line {
   const mat = new THREE.LineDashedMaterial({ color, dashSize: 12, gapSize: 8, depthTest: false });
@@ -1637,6 +1780,8 @@ function turnOnGround(degrees: number): Vec3 {
  */
 export function pullableDistance(recipe: SolidRecipe): number | null {
   if (recipe.kind === "face") return 0;
+  // An edge has no surface to grow from.
+  if (recipe.kind === "edge") return null;
   if (recipe.kind === "extrude" || recipe.kind === "loop") return recipe.distance;
   return null;
 }

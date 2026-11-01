@@ -194,10 +194,12 @@ describe("faces persist", () => {
     expect(reopened.hash()).toBe(s.hash());
   });
 
-  it("a schema 5 file still loads and reports version 6", () => {
+  it("a schema 5 file still loads and upgrades to the current version", () => {
     const doc = deserialize(schema5File());
-    expect(SCHEMA_VERSION).toBe(6);
-    expect(doc.schemaVersion).toBe(6);
+    // The file carries no face and no edge, so every later step is a version
+    // bump with nothing to rewrite.
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(6);
+    expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
     const solid = [...doc.solids.values()][0]!;
     expect(solid.recipe.kind).toBe("loop");
     const s = new Session();

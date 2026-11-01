@@ -30,7 +30,7 @@ describe("document", () => {
     expect(doc.envelope).toBeNull();
     expect(doc.section).toBeNull();
     expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(6); // bump this test only with a real migration
+    expect(SCHEMA_VERSION).toBe(7); // bump this test only with a real migration
   });
 });
 

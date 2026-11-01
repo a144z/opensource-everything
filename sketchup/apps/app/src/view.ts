@@ -751,7 +751,7 @@ export class View {
 
   #build(solid: Solid): CachedMesh {
     const geometry = toBufferGeometry(this.#session.meshOf(solid.id));
-    const flat = solid.recipe.kind === "face";
+    const flat = solid.recipe.kind === "face" || solid.recipe.kind === "edge";
     const material = new THREE.MeshStandardMaterial({
       color: new THREE.Color(solid.meta.color),
       roughness: solid.meta.roughness,

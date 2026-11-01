@@ -404,9 +404,10 @@ export function hashMesh(mesh: MeshData): string {
   return h.toString(16).padStart(8, "0");
 }
 
-/* Named submodules: polygon meshing, faces, interchange, units, inference. */
+/* Named submodules: polygon meshing, faces, edges, interchange, units, inference. */
 export * from "./polygon.js";
 export * from "./face.js";
+export * from "./edges.js";
 export * from "./io.js";
 export * from "./units.js";
 export * from "./inference.js";

@@ -2,7 +2,7 @@
 
 import type { Vec2, Vec3 } from "@apexus/geometry";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 export const FIT_TOLERANCE = 1e-2;
 
 export type SolidId = string;
@@ -91,6 +91,16 @@ export type SolidRecipe =
        * BOQ counted as material, which is why the honest shape is its own kind.
        */
       readonly kind: "face";
+      readonly points: readonly Vec2[];
+      readonly plane: { readonly origin: Vec3; readonly normal: Vec3 };
+    })
+  | (RecipeBase & {
+      /**
+       * An open run of edges: the line tool's chain before (or without) closing
+       * into a face. No volume and no area, so it cannot be pushed or measured
+       * as material; it exists to be seen and to be snapped to.
+       */
+      readonly kind: "edge";
       readonly points: readonly Vec2[];
       readonly plane: { readonly origin: Vec3; readonly normal: Vec3 };
     })

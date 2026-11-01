@@ -60,7 +60,7 @@
         "Escape cancels without leaving a partial object",
         "undo removes the whole chain in one step"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "L1-6",

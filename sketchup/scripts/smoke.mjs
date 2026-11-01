@@ -241,11 +241,13 @@ async function typedInputProbe(api) {
     `(() => {
       const h = window.fitcheck;
       if (!h) return { skipped: true };
-      const roots = h.rootIds();
-      if (roots.length === 0) return { skipped: true, reason: 'no solids' };
-      const id = roots[0];
+      // Move and Rotate need a solid to act on: earlier probes may have left
+      // faces and edge chains behind, and neither can be moved.
+      const boxes = h.solids().filter((s) => !/face|edge/i.test(s.name));
+      if (boxes.length === 0) return { skipped: true, reason: 'no solids' };
+      const id = boxes[0].id;
       const before = h.minOf(id);
-      h.selectAll();
+      h.selectOnly(id);
       h.useTool('move');
       const undoBefore = h.undoCount();
       h.typeText('0,250', false);
@@ -260,7 +262,7 @@ async function typedInputProbe(api) {
       // A fresh object of its own, so the turn is measured on a shape whose X
       // and Y extents differ; the probe box is square and cannot show a swap.
       h.addBox({ width: 100, height: 20, depth: 30 });
-      const fresh = h.rootIds().find((r) => r !== id);
+      const fresh = h.rootIds().find((r) => r !== id && !/face|edge/i.test(h.solids().find((s) => s.id === r)?.name ?? ''));
       h.selectOnly(fresh);
       const b0 = h.boundsOf(fresh);
       h.useTool('rotate');
@@ -282,6 +284,84 @@ async function typedInputProbe(api) {
         heightKept: Math.abs((b1[5] - b1[2]) - (b0[5] - b0[2])) < 1e-6,
         b0,
         b1,
+      };
+    })()`,
+  );
+}
+
+/**
+ * The Line tool, driven through the live controller: three clicks plus Enter
+ * make one open chain (edges), clicking back on the start makes a face, and a
+ * typed length places the next point exactly. Every count is a delta from this
+ * probe's own baseline, because earlier probes have already put objects in the
+ * model. Each chain must be one undo step and nothing may survive a cancel.
+ */
+async function lineProbe(api) {
+  return evaluate(
+    api,
+    `(() => {
+      const h = window.fitcheck;
+      if (!h) return { skipped: true };
+      h.run('select');
+      const base = h.solids().length;
+      const undoBase = h.undoCount();
+
+      const open = h.drawLine([[0, 0], [1000, 0], [1000, 600]], false);
+      const openCount = h.solids().length - base;
+      h.run('undo');
+      const afterUndo = h.solids().length - base;
+
+      const closed = h.drawLine([[0, 0], [3000, 0], [3000, 2000]], true);
+      const faceBounds = closed ? h.boundsOf(closed.id) : null;
+
+      // A typed length: click the start, move towards +X, type 500, Enter.
+      h.useTool('line');
+      h.clickGround([0, 4000]);
+      const pendingAfterFirst = h.hasPending();
+      h.clickGround([800, 4000]);
+      const pendingAfterSecond = h.hasPending();
+      h.typeText('500', false);
+      const typedHint = h.hint();
+      const typedChain = h.chainLength();
+      // Enter places the typed point and keeps the chain going, so a second
+      // Enter is what ends it, exactly as SketchUp's precision input works.
+      h.typeText('', true);
+      const placedChain = h.chainLength();
+      h.typeText('', true);
+      // Read who was selected before switching tools: choosing a tool cancels
+      // the gesture, and with it the finish step's selection.
+      const typedId = h.lastAdded();
+      h.useTool('select');
+      // The typed point is the one after the cursor stop, so the segment it
+      // made is what "exactly that far" means, not the chain's extent.
+      const typedPts = typedId ? h.edgePoints(typedId) : null;
+      const typedSegment =
+        typedPts && typedPts.length >= 3
+          ? Math.hypot(typedPts[2][0] - typedPts[1][0], typedPts[2][1] - typedPts[1][1])
+          : null;
+
+      // Escape mid-chain leaves nothing behind.
+      const beforeEscape = h.solids().length;
+      h.useTool('line');
+      h.clickGround([0, 6000]);
+      h.clickGround([700, 6000]);
+      h.escape();
+      h.useTool('select');
+      h.run('select');
+      h.escape();
+      return {
+        skipped: false,
+        openKind: open ? open.kind : null,
+        openCount,
+        afterUndo,
+        closedKind: closed ? closed.kind : null,
+        faceArea: faceBounds ? (faceBounds[3] - faceBounds[0]) * (faceBounds[4] - faceBounds[1]) : null,
+        typedHint,
+        typedChain,
+        placedChain,
+        typedSpan: typedSegment,
+        escaped: h.solids().length - beforeEscape,
+        undoTotal: h.undoCount() - undoBase,
       };
     })()`,
   );
@@ -426,6 +506,24 @@ try {
     checks.push(
       ["paint is one undo step", probe.undoAfter === probe.undoBefore + 1, `${probe.undoBefore} -> ${probe.undoAfter}`],
     );
+  }
+
+  const line = await lineProbe(api);
+  if (line.skipped) {
+    console.log("SKIP  line tool (no window.fitcheck harness)");
+  } else {
+    checks.push(["Line makes one open chain", line.openKind === "edge" && line.openCount === 1, JSON.stringify(line)]);
+    checks.push(["chain undo is one step", line.afterUndo === 0, String(line.afterUndo)]);
+    checks.push(["closing the ring makes a face", line.closedKind === "face", String(line.closedKind)]);
+    checks.push(["the face spans the drawn loop", line.faceArea === 6000000, String(line.faceArea)]);
+    checks.push(["typing alone places nothing", line.typedChain === 2, String(line.typedChain)]);
+    checks.push(["Enter places the typed point", line.placedChain === 3, String(line.placedChain)]);
+    checks.push([
+      "typed length places the next point",
+      line.typedSpan === 500,
+      `${line.typedSpan} | chain=${line.typedChain}->${line.placedChain} | ${line.typedHint}`,
+    ]);
+    checks.push(["Escape leaves nothing behind", line.escaped === 0, String(line.escaped)]);
   }
 
   const groups = await groupProbe(api);

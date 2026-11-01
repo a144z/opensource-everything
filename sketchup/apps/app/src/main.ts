@@ -1,6 +1,6 @@
 import "./style.css";
 import * as THREE from "three";
-import { parseLength, polygonArea, toStlAsciiNamed, type Vec3 } from "@apexus/geometry";
+import { parseLength, polygonArea, polylineLength, toStlAsciiNamed, type Vec3 } from "@apexus/geometry";
 import {
   Session,
   addSolid,
@@ -305,6 +305,11 @@ function setSelection(ids: readonly SolidId[], additive = false): void {
  * a face's volume would report from ever reaching the user as a real answer.
  */
 function describeExtent(solid: Solid, from: Session): { readonly name: string; readonly extent: string } {
+  if (solid.recipe.kind === "edge") {
+    // An edge is a path, so its size is how far it runs: two points make one
+    // segment, more make a chain the user drew.
+    return { name: solid.meta.name, extent: `${(polylineLength(solid.recipe.points) / 10).toFixed(1)} cm` };
+  }
   if (solid.recipe.kind === "face") {
     // The ring is planar and unprojected, so its 2D area is its true area even
     // after a move or a rotation: the recipe matrix leaves the recipe alone.
@@ -1678,6 +1683,28 @@ interface FitCheckHarness {
   selectOnly(id: string): void;
   /** Choose a tool exactly as the toolbar button does. */
   useTool(tool: string): void;
+  /**
+   * Draw a line chain through the live controller: every point is a ground
+   * click, and `close` ends by clicking the first one. Returns what the chain
+   * became, or null when nothing survived.
+   */
+  drawLine(points: [number, number][], close: boolean): { kind: string; id: string } | null;
+  /** One click on the ground plane at (x, y), through the active tool. */
+  clickGround(point: [number, number]): void;
+  /** The lone selected object, which is what a finishing tool just added. */
+  lastAdded(): string | null;
+  /** The status line, as it reads right now. */
+  hint(): string;
+  /** A solid's recipe points, when it is an edge chain. */
+  edgePoints(id: string): number[][] | null;
+  /** The tool's last measured number, as the status line shows it. */
+  measure(): unknown;
+  /** Whether a gesture is half-finished. */
+  hasPending(): boolean;
+  /** The digits the tool has typed so far. */
+  typedText(): string;
+  /** Points in the live line chain, 0 when none. */
+  chainLength(): number;
   /** The stored keymap text, or null, so persistence can be checked. */
   keymapStorage(): string | null;
   /** Rebind through the same path the palette uses. */
@@ -1740,6 +1767,46 @@ window.fitcheck = {
   solids: () =>
     [...session.document.solids.values()].map((s) => ({ id: s.id, name: s.meta.name, color: s.meta.color })),
   undoCount: () => session.historyDepth,
+  /**
+   * Drive the line tool from a test: a list of ground points, then whether to
+   * close. It goes through the same controller the mouse does, so the smoke
+   * check proves the click chain and not a parallel code path.
+   */
+  lastAdded: () => (selection.size === 1 ? [...selection][0]! : null),
+  hint: () => hint.textContent ?? "",
+  measure: () => tools.measure(),
+  hasPending: () => tools.hasPending,
+  typedText: () => tools.typedText,
+  chainLength: () => tools.chainLength,
+  edgePoints(id) {
+    const solid = session.document.solids.get(id);
+    // A typed-length check measures the segment the typing placed, so the raw
+    // path has to be readable: bounds would only show the chain's extent.
+    return solid && solid.recipe.kind === "edge" ? solid.recipe.points.map((pt) => [pt[0], pt[1]]) : null;
+  },
+  clickGround(point: [number, number]) {
+    tools.hover([point[0], point[1], 0], 0, 0);
+    tools.click({ kind: "ground", point: [point[0], point[1], 0] }, false, 0, 0);
+  },
+  drawLine(points: [number, number][], close: boolean) {
+    const before = session.document.solids;
+    tools.setTool("line");
+    const ground = (pt: [number, number]): PickHit => ({ kind: "ground", point: [pt[0], pt[1], 0] });
+    for (const pt of points) {
+      tools.hover([pt[0], pt[1], 0], 0, 0);
+      tools.click(ground(pt), false, 0, 0);
+    }
+    const first = points[0];
+    if (close && first) {
+      tools.hover([first[0], first[1], 0], 0, 0);
+      tools.click(ground(first), false, 0, 0);
+    } else tools.typeKey("Enter");
+    // The finishing step selects what it made; an abandoned chain selects
+    // nothing, so a null here means no object appeared.
+    const added = selection.size === 1 && !before.has([...selection][0]!) ? session.document.solids.get([...selection][0]!) : undefined;
+    tools.setTool("select");
+    return added ? { kind: added.recipe.kind, id: added.id } : null;
+  },
   selectAll() {
     const roots = rootsOf(session.document);
     setSelection(roots);

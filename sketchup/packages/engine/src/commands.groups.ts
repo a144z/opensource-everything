@@ -1,7 +1,7 @@
 import { patchOf, type Command } from "./command.js";
 import { parentsOf } from "./graph.js";
 import { identity4, multiply4 } from "./math.js";
-import { assertFaceRecipe, assertSolidRecipe, newMeta, requireSolid } from "./seams.js";
+import { assertEdgeRecipe, assertFaceRecipe, assertSolidRecipe, newMeta, requireSolid } from "./seams.js";
 import type { DocumentState, Solid, SolidId, SolidRecipe } from "./types.js";
 
 /**
@@ -120,10 +120,11 @@ export function ungroupSolid(id: SolidId): Command {
       }
       for (const [changedId, solid] of forward) {
         if (!solid) continue;
-        // A freed face is still a legal object: it has surface but no volume,
-        // so it is checked by the surface rule rather than the solid one.
+        // The check for each kind's own idea of validity: a face and an edge
+        // have no volume but are legal objects, a solid must enclose space.
         const check = (r: SolidRecipe) => ctx.resolveWith?.(r, after) ?? ctx.resolve(r);
         if (solid.recipe.kind === "face") assertFaceRecipe(solid.recipe, check);
+        else if (solid.recipe.kind === "edge") assertEdgeRecipe(solid.recipe, check);
         else assertSolidRecipe(solid.recipe, check);
       }
       return patchOf(doc, forward, backward, label);

@@ -68,6 +68,10 @@ type Upgrader = (raw: Raw) => Raw;
  * the first step that is not one-way: a 5-file opens here, but a 6-file that
  * holds a face is refused by a 5 reader, which is why the version is raised
  * rather than a face being smuggled in as a loop with distance 0.
+ *
+ * 6 -> 7: added the open `edge` recipe (the line tool's chain). A 6-file has no
+ * edges, so it upgrades by being understood; a 7-file that holds one is refused
+ * by a 6 reader, so the version is raised for the same reason as 5 -> 6.
  */
 const MIGRATIONS: Record<number, Upgrader> = {
   1: (raw) => ({ ...raw, schemaVersion: 2 }),
@@ -75,6 +79,7 @@ const MIGRATIONS: Record<number, Upgrader> = {
   3: (raw) => ({ ...raw, schemaVersion: 4 }),
   4: (raw) => ({ ...raw, schemaVersion: 5 }),
   5: (raw) => ({ ...raw, schemaVersion: 6 }),
+  6: (raw) => ({ ...raw, schemaVersion: 7 }),
 };
 
 export function deserialize(raw: unknown): DocumentState {
@@ -188,6 +193,7 @@ const KINDS = new Set<SolidRecipe["kind"]>([
   "extrude",
   "loop",
   "face",
+  "edge",
   "boolean",
   "transform",
   "instance",
@@ -255,6 +261,19 @@ export function normaliseRecipe(id: string, raw: SolidRecipe): SolidRecipe {
       if (!raw.plane) throw new Error(`solid ${id} face has no plane`);
       return {
         kind: "face",
+        points,
+        plane: { origin: nums(raw.plane.origin, 3, "plane.origin") as [number, number, number], normal: nums(raw.plane.normal, 3, "plane.normal") as [number, number, number] },
+        matrix,
+      };
+    }
+    case "edge": {
+      // Two points is the least that is a line; one is a click that never moved,
+      // and reading it would put a pickable speck in the model.
+      if (!Array.isArray(raw.points) || raw.points.length < 2) throw new Error(`solid ${id} edge needs 2+ points`);
+      const points = raw.points.map((p, i) => nums(p, 2, `points[${i}]`) as [number, number]);
+      if (!raw.plane) throw new Error(`solid ${id} edge has no plane`);
+      return {
+        kind: "edge",
         points,
         plane: { origin: nums(raw.plane.origin, 3, "plane.origin") as [number, number, number], normal: nums(raw.plane.normal, 3, "plane.normal") as [number, number, number] },
         matrix,

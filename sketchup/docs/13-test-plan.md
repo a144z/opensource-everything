@@ -221,6 +221,7 @@ Run: `npm test` (all vitest projects). Filter: `npx vitest run apps/app`.
 
 | Date | Run | Command | Result | Notes |
 |---|---|---|---|---|
+| 2026-11-01 | gate | `.\harness.ps1 verify` | PASS | every check, typecheck 0 errors, 436/436 tests, smoke clean. Adds the Line tool end to end: an open chain is one edge object and one undo step, closing on the start makes a face of the drawn area, typing places nothing until Enter and then exactly 500 mm, Escape leaves nothing. |
 | 2026-11-01 | gate | `.\harness.ps1 verify` | PASS | 10/10 checks, typecheck 0 errors, 424/424 tests, smoke clean. Cold start: the smoke step starts Vite on :5198 itself. |
 | 2026-10-31 | - | `npm test` | not run | superseded: the loop runs the gate every cycle |
 

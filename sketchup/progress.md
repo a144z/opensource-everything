@@ -3,6 +3,45 @@
 A letter to the next session. Short, factual, newest cycle at the top.
 Git wins over anything here that disagrees.
 
+## Cycle 2026-11-01 (line tool)
+
+Done
+- L1-5 passes. The Line tool draws a real chain: every click adds a segment,
+  clicking back on the start closes the ring into a face, Enter ends an open
+  chain, Escape cancels with nothing committed, and the whole chain is one
+  object and one undo step.
+- Edges are first-class geometry, not a guide slab. New recipe kind `"edge"`
+  (`packages/geometry/src/edges.ts`: `EdgePath`, `edgePositions`, `edgesMesh`),
+  zero volume and zero area, validated by `assertEdgeRecipe`. The renderer
+  reuses the face flat path and the outliner labels it "Edge".
+- `SCHEMA_VERSION` 6 -> 7 with a migration entry. A version-6 file has no edges,
+  so it upgrades simply by being understood.
+- Typed length: digits preview the next point, Enter places it exactly that far
+  along the cursor direction (falling back to the last segment, then the red
+  axis), and the chain keeps going. A second Enter finishes it.
+- Smoke now drives the tool through the live controller (`drawLine`,
+  `clickGround`, `chainLength`, `edgePoints`, `lastAdded`, `hint`, `measure`):
+  open chain, single undo, close to face with the right area, typing places
+  nothing, Enter places exactly 500 mm, Escape leaves nothing.
+
+Decisions
+- The finished chain is *one* command, so one Ctrl+Z removes a whole drawn
+  loop, as SketchUp does.
+- `hover` honours a 3D point when the caller supplies one instead of always
+  re-projecting the pixel: a snap has already found the vertex and re-projecting
+  threw that away.
+- `lastAdded` reads the finish step's selection; "the last row" also answers with
+  whatever the model already held.
+
+Open bugs
+- none known; the gate is green (13/13 checks, typecheck, 436 tests, smoke).
+
+Next
+1. L1-6 - inference wiring + glyphs (endpoint/midpoint snaps, coloured axis
+   locks, Shift square, status hint naming the active inference).
+2. Then L1-7 offset, L1-8 follow-me, L1-10 dimension, L1-11 tape, L1-9
+   sticky/weld, L3-5/6/7, L1-15 soften.
+
 ## Cycle 2026-11-01 (first green gate)
 
 Done

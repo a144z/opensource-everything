@@ -1,7 +1,7 @@
 import type { Vec2, Vec3 } from "@apexus/geometry";
 import { patchOf, type Command } from "./command.js";
 import { identity4, withRotation, withScale, withTranslation } from "./math.js";
-import { assertFaceRecipe, assertSolidRecipe, newMeta, requireSolid, transformPatch } from "./seams.js";
+import { assertEdgeRecipe, assertFaceRecipe, assertSolidRecipe, newMeta, requireSolid, transformPatch } from "./seams.js";
 import type { Solid, SolidId, SolidMeta, SolidRecipe } from "./types.js";
 
 /**
@@ -34,6 +34,32 @@ export function addFace(
     label: "Add Face",
     apply(doc, ctx) {
       assertFaceRecipe(recipe, ctx.resolve);
+      const id = ctx.nextId();
+      const solid: Solid = { id, revision: 1, recipe, meta: newMeta(doc, recipe, meta) };
+      return patchOf(doc, new Map([[id, solid]]), new Map([[id, null]]), `Add ${solid.meta.name}`);
+    },
+  };
+}
+
+/**
+ * Add an open run of edges: the line tool's chain, left unclosed.
+ *
+ * One object for the whole chain, not one per segment, so a scribbled outline is
+ * a single row in the outliner and a single undo step. It is not a surface: no
+ * area, no volume, so push/pull and the BOQ ignore it, but it is picked,
+ * selected and snapped to like anything else.
+ */
+export function addEdges(
+  points: readonly Vec2[],
+  plane: { readonly origin: Vec3; readonly normal: Vec3 },
+  meta?: Partial<SolidMeta>,
+): Command {
+  const recipe: Extract<SolidRecipe, { kind: "edge" }> = { kind: "edge", points, plane, matrix: identity4() };
+  return {
+    kind: "addEdges",
+    label: "Add Edges",
+    apply(doc, ctx) {
+      assertEdgeRecipe(recipe, ctx.resolve);
       const id = ctx.nextId();
       const solid: Solid = { id, revision: 1, recipe, meta: newMeta(doc, recipe, meta) };
       return patchOf(doc, new Map([[id, solid]]), new Map([[id, null]]), `Add ${solid.meta.name}`);

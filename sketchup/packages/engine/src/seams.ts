@@ -43,6 +43,8 @@ export function labelFor(recipe: SolidRecipe): string {
       return "Loop";
     case "face":
       return "Face";
+    case "edge":
+      return "Edge";
     case "boolean":
       return recipe.op === "union" ? "Union" : recipe.op === "difference" ? "Cut" : "Intersect";
     case "transform":
@@ -98,6 +100,24 @@ export function assertFaceRecipe(
   const geo = analyseMesh(resolve(recipe));
   if (!isFiniteBounds(geo.bounds)) throw new RangeError("Face produced no geometry");
   if (geo.mesh.indices.length === 0) throw new RangeError("face could not be triangulated (self-intersecting?)");
+}
+
+/**
+ * An edge path, validated by meshing it.
+ *
+ * An edge has no volume, so the volume rule in `assertSolidRecipe` would refuse
+ * every one; the honest checks are that two distinct points survive and that the
+ * result is finite. Segment collapses are dropped by the mesher, so a chain that
+ * doubles back on itself is legal as long as it has length.
+ */
+export function assertEdgeRecipe(recipe: Extract<SolidRecipe, { kind: "edge" }>, resolve: Resolve): void {
+  if (recipe.points.length < 2) throw new RangeError("an edge needs at least two points");
+  if (recipe.plane.normal[0] === 0 && recipe.plane.normal[1] === 0 && recipe.plane.normal[2] === 0) {
+    throw new RangeError("edge has a zero-length plane normal");
+  }
+  const geo = analyseMesh(resolve(recipe));
+  if (!isFiniteBounds(geo.bounds)) throw new RangeError("Edge produced no geometry");
+  if (geo.mesh.indices.length === 0) throw new RangeError("an edge needs two distinct points");
 }
 
 export function newMeta(doc: DocumentState, recipe: SolidRecipe, meta?: Partial<SolidMeta>): SolidMeta {
