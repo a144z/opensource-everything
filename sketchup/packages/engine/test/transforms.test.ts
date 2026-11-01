@@ -138,6 +138,33 @@ describe("transforms preserve true size", () => {
     s.execute(translateSolids([id], [100, 0, 0]));
     expect(s.boundsOf(id).min[0]).toBeCloseTo(0, 6);
   });
+
+  it("move tool: copy leaves the original in place", () => {
+    // What Move with Ctrl held does: duplicate at the delta, original untouched.
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    s.execute(duplicateSolid(id, [40, 0, 0]));
+    expect(s.document.solids.size).toBe(2);
+    const xs = [...s.document.solids.values()].map((sol) => s.boundsOf(sol.id).min[0]).sort((a, b) => a - b);
+    expect(xs).toEqual([0, 40]);
+  });
+
+  it("rotate tool: turning about a far pivot orbits, not just spins", () => {
+    // Box spans 0..10 (centre 5); pivot (100,0) -> 180 deg puts centre at 195.
+    const s = new Session();
+    s.execute(addSolid(box(10, 10, 10)));
+    const id = only(s);
+    const before = s.analyse(id).volume;
+    s.execute(rotateSolids([id], "z", 180, [100, 0, 0]));
+    const c = s.boundsOf(id);
+    expect((c.min[0] + c.max[0]) / 2).toBeCloseTo(195, 4);
+    expect((c.min[1] + c.max[1]) / 2).toBeCloseTo(-5, 4);
+    const [x, y] = size(s, id);
+    expect(x).toBeCloseTo(10, 4);
+    expect(y).toBeCloseTo(10, 4);
+    expect(s.analyse(id).volume).toBeCloseTo(before, 3);
+  });
 });
 
 describe("arrays and copies", () => {

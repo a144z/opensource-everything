@@ -20,7 +20,11 @@ export type Tool =
   | "tape"
   | "dimension"
   | "followme"
-  | "offset";
+  | "offset"
+  | "move"
+  | "rotate"
+  | "circle"
+  | "arc";
 
 export type PickHit =
   | { readonly kind: "ground"; readonly point: Vec3 }
@@ -28,7 +32,7 @@ export type PickHit =
   | { readonly kind: "gizmo" };
 
 export interface ViewEvents {
-  onPick(hit: PickHit, additive: boolean): void;
+  onPick(hit: PickHit, additive: boolean, copy?: boolean): void;
   onHover(point: Vec3 | null): void;
   /** Gizmo finished a drag: the object's new world matrix, column-major. */
   onGizmoCommit(id: SolidId, matrix: readonly number[]): void;
@@ -441,7 +445,7 @@ export class View {
     if (!down || e.button !== 0) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
     const hit = this.pick(e.clientX, e.clientY);
-    if (hit) this.#events.onPick(hit, e.shiftKey);
+    if (hit) this.#events.onPick(hit, e.shiftKey, e.ctrlKey || e.metaKey);
   };
 
   #onPointerMove = (e: PointerEvent): void => {

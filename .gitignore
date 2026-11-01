@@ -34,6 +34,7 @@ _blockforge_*
 **/intentc.py
 **/shapes.py
 **/ir.py
+**/12-surface-inventory.md
 
 # ...except the one generated module the shipped app imports. Its spec stays
 # private; the emitted table is ordinary product source.

@@ -1,10 +1,22 @@
 import * as THREE from "three";
-import { formatLength, parseLength, type Vec2, type Vec3 } from "@apexus/geometry";
+import {
+  arcPoints,
+  circlePoints,
+  closedArc,
+  counterClockwise,
+  formatLength,
+  parseLength,
+  polylineLength,
+  type Vec2,
+  type Vec3,
+} from "@apexus/geometry";
 import {
   addSolid as addSolidCmd,
+  duplicateSolid,
   guessAxis,
   makeAnnotation,
   pullFace as pullFaceCmd,
+  rotateSolids,
   scaleSolids,
   translateSolids,
   type Annotation,
@@ -28,7 +40,7 @@ export interface ToolHost {
   /** Something user-visible happened (typed length, rejected edit). */
   setHint(text: string): void;
   /** Selection is app state; the tool asks the shell to change it. */
-  select(ids: readonly SolidId[]): void;
+  select(ids: readonly SolidId[], additive?: boolean): void;
   /** Screen position of the cursor, for the distance readout. */
   cursor(): { x: number; y: number };
   /** Unit shown to the user for typed lengths. */
@@ -37,10 +49,24 @@ export interface ToolHost {
   axisLocked(): boolean;
   /** Annotations are app state (they never enter the document); the tool adds here. */
   annotate(note: Annotation): void;
+  /** What is selected right now; move and rotate act on all of it. */
+  selection(): readonly SolidId[];
 }
 
 type Pending =
   | { readonly kind: "rect"; readonly start: Vec2; current: Vec2 }
+  | {
+      /** Circle: centre on the ground, radius follows the mouse. */
+      readonly kind: "circle";
+      readonly centre: Vec3;
+      current: Vec3;
+    }
+  | {
+      /** Arc: three points on the ground - start, a point on the arc, the end. */
+      readonly kind: "arc";
+      readonly points: Vec3[];
+      current: Vec3;
+    }
   | {
       readonly kind: "pull";
       readonly id: SolidId;
@@ -61,6 +87,21 @@ type Pending =
       current: Vec3;
     }
   | { readonly kind: "tape"; readonly from: Vec3; readonly planeNormal: Vec3; current: Vec3 }
+  | {
+      /** Move: grab a point, drop it elsewhere. Copy mode duplicates instead. */
+      readonly kind: "move";
+      readonly from: Vec3;
+      readonly planeNormal: Vec3;
+      readonly copy: boolean;
+      current: Vec3;
+    }
+  | {
+      /** Rotate: a pivot on the ground plane, then a reference direction. */
+      readonly kind: "rotate";
+      readonly pivot: Vec3;
+      readonly from: Vec3;
+      current: Vec3;
+    }
   | {
       /** Follow-me: the path is a line already on the ground, the profile a solid. */
       readonly kind: "follow";
@@ -184,8 +225,7 @@ export class ToolController {
       );
     } else if (p?.kind === "pull") {
       this.drag(clientX, clientY);
-    } else if (p?.kind === "line" || p?.kind === "tape" || p?.kind === "dimension") {
-      const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
+    } else if (p?.kind === "line" || p?.kind === "tape" || p?.kind === "dimension") {      const pt = this.#host.view.planePoint(clientX, clientY, p.from, p.planeNormal);
       if (!pt) return;
       const snapped = this.#snap(pt);
       const to = this.#constrain(p.from, snapped.point);
@@ -194,6 +234,24 @@ export class ToolController {
       const label = p.kind === "tape" ? "Tape" : p.kind === "dimension" ? "Dimension" : "Line";
       this.#host.setHint(
         `${label} ${fmt(distance(p.from, to))} mm  ${this.#glyphHint()} click to finish, Esc cancels`,
+      );
+    } else if (p?.kind === "circle") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.centre, GLOSSARY_UP);
+      if (!pt) return;
+      p.current = this.#snap(pt).point;
+      this.#drawCircle(p.centre, distance(p.centre, p.current));
+      this.#host.setHint(
+        `Circle radius ${fmt(distance(p.centre, p.current))} mm  ${this.#glyphHint()} click to place, Esc cancels`,
+      );
+    } else if (p?.kind === "arc") {
+      const pt = this.#host.view.planePoint(clientX, clientY, p.points[0]!, GLOSSARY_UP);
+      if (!pt) return;
+      p.current = this.#snap(pt).point;
+      const ring = arcPoints(p.points, p.current);
+      this.#setPreview(this.#ring3(ring));
+      this.#host.setHint(
+        `Arc ${fmt(polylineLength(ring))} mm  ${this.#glyphHint()} ` +
+          `${p.points.length === 1 ? "click a point on the arc" : "click the end point"}, Esc cancels`,
       );
     } else if (p?.kind === "follow" && point) {
       p.current = point;
@@ -206,10 +264,28 @@ export class ToolController {
       this.#host.setHint(
         `Offset ${fmt(p.base)} -> ${fmt(p.current)} mm  click to apply, Esc cancels`,
       );
+    } else if (p?.kind === "move" || p?.kind === "rotate") {
+      const plane = p.kind === "move" ? { at: p.from, n: p.planeNormal } : { at: p.pivot, n: GLOSSARY_UP };
+      const pt = this.#host.view.planePoint(clientX, clientY, plane.at, plane.n);
+      if (!pt) return;
+      const to = this.#snap(pt).point;
+      p.current = p.kind === "move" ? this.#constrain(p.from, to) : to;
+      this.#drawSpan(p.kind === "move" ? p.from : p.pivot, p.current);
+      if (p.kind === "move") {
+        const d = sub3(p.current, p.from);
+        this.#host.setHint(
+          `Move ${fmt(Math.hypot(d[0], d[1], d[2]))} mm  ${this.#glyphHint()} ` +
+            `${p.copy ? "" : "hold Ctrl for copy, "}click to apply, Esc cancels`,
+        );
+      } else {
+        this.#host.setHint(
+          `Rotate ${this.#angle(p, p.current).toFixed(1)} deg  ${this.#glyphHint()} click to apply, Esc cancels`,
+        );
+      }
     }
   }
 
-  click(hit: PickHit, additive: boolean, clientX: number, clientY: number): void {
+  click(hit: PickHit, additive: boolean, clientX: number, clientY: number, copy = false): void {
     switch (this.#tool) {
       case "rectangle":
         this.#clickRectangle(hit);
@@ -231,6 +307,18 @@ export class ToolController {
         return;
       case "offset":
         this.#clickOffset(hit);
+        return;
+      case "move":
+        this.#clickMove(hit, clientX, clientY, copy);
+        return;
+      case "rotate":
+        this.#clickRotate(hit, clientX, clientY);
+        return;
+      case "circle":
+        this.#clickCircle(hit, clientX, clientY);
+        return;
+      case "arc":
+        this.#clickArc(hit, clientX, clientY);
         return;
       case "select":
         this.#clickSelect(hit, additive);
@@ -281,6 +369,81 @@ export class ToolController {
   }
 
   /* ------------------------------------------------------------- handlers */
+
+  /* ------------------------------------------------------- circle and arc */
+
+  #clickCircle(hit: PickHit, clientX: number, clientY: number): void {
+    const p = this.#pending;
+    if (p?.kind === "circle") {
+      this.#cancel();
+      const radius = distance(p.centre, p.current);
+      if (radius < 0.5) return;
+      const ring = circlePoints(p.centre, p.current, radius);
+      this.#addLoop(ring, 10, `Circle r${fmt(radius)}`);
+      return;
+    }
+    const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    this.#pending = { kind: "circle", centre: at, current: [at[0] + 1, at[1], at[2]] };
+    this.#host.setHint("Circle: move to set the radius, click to place, Esc cancels");
+  }
+
+  /**
+   * Arc is the SketchUp two-step: start point, then a point the arc passes
+   * through, then the end. Three clicks, one solid, one undo step.
+   */
+  #clickArc(hit: PickHit, clientX: number, clientY: number): void {
+    const p = this.#pending;
+    const at = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    if (p?.kind === "arc") {
+      p.points.push(at);
+      if (p.points.length === 3) {
+        this.#cancel();
+        const ring = arcPoints(p.points, null);
+        if (polylineLength(ring) < 0.5) return;
+        // An open path is closed back to the chord so it extrudes into a solid.
+        this.#addLoop(closedArc(ring), 10, "Arc");
+      }
+      return;
+    }
+    this.#pending = { kind: "arc", points: [at], current: at };
+    this.#host.setHint("Arc: click a point the arc passes through, then its end, Esc cancels");
+  }
+
+  /** One place where a closed path on the ground becomes geometry. */
+  #addLoop(ring: readonly Vec2[], thickness: number, name: string): void {
+    const recipe: SolidRecipe = {
+      kind: "loop",
+      points: counterClockwise(ring),
+      plane: { origin: [0, 0, 0], normal: [0, 0, 1] },
+      distance: thickness,
+      matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    };
+    try {
+      const patch = this.#host.session.execute(addSolidCmd(recipe, { name }));
+      const added = [...patch.forward.keys()][0];
+      if (added) {
+        this.#lastPullId = added;
+        this.#host.select([added]);
+      }
+      this.#host.setHint(`${name}: added. Push/Pull to give it height.`);
+    } catch (err) {
+      this.#host.setHint((err as Error).message);
+    }
+  }
+
+  #drawCircle(centre: Vec3, radius: number): void {
+    const ring = circlePoints(centre, [centre[0] + radius, centre[1], centre[2]], radius, 48);
+    this.#setPreview(this.#ring3(ring));
+  }
+
+  /** Ring as a THREE polyline with the first point repeated to close it. */
+  #ring3(ring: readonly Vec2[]): THREE.Vector3[] {
+    const out = ring.map((q) => new THREE.Vector3(q[0], q[1], 0.5));
+    if (out.length > 0) out.push(out[0]!.clone());
+    return out;
+  }
 
   #clickRectangle(hit: PickHit): void {
     const p = this.#pending;
@@ -569,9 +732,94 @@ export class ToolController {
     }
   }
 
+  /* ----------------------------------------------------------- move, rotate */
+
+  /**
+   * Move works like SketchUp's: pick a grab point, then a landing point. With
+   * `additive` (Ctrl/Shift at the first click) it copies instead of moving.
+   * Both are one command, so one undo step either way.
+   */
+  #clickMove(hit: PickHit, clientX: number, clientY: number, copy: boolean): void {
+    const p = this.#pending;
+    const ids = [...this.#host.selection()];
+    if (p?.kind === "move") {
+      this.#cancel();
+      const delta = sub3(p.current, p.from);
+      if (Math.hypot(delta[0], delta[1], delta[2]) < 0.5) {
+        this.#host.setHint("Move: that is zero distance, nothing done.");
+        return;
+      }
+      try {
+        for (const id of ids) {
+          this.#host.session.execute(
+            p.copy ? duplicateSolid(id, delta) : translateSolids([id], delta),
+          );
+        }
+        this.#host.setHint(
+          `${p.copy ? "Copied" : "Moved"} ${ids.length} object(s) ${fmt(Math.hypot(delta[0], delta[1], delta[2]))} mm.`,
+        );
+      } catch (err) {
+        this.#host.setHint((err as Error).message);
+      }
+      return;
+    }
+    if (ids.length === 0) {
+      this.#host.setHint("Move: select something first.");
+      return;
+    }
+    const from = hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!from) return;
+    this.#pending = { kind: "move", from, planeNormal: GLOSSARY_UP, copy, current: from };
+    this.#host.setHint(
+      `Move: click where it lands${copy ? " (copy mode)" : " (hold Ctrl at the grab point to copy)"}`,
+    );
+  }
+
+  /** Rotate: click the pivot, then the reference direction, then the angle. */
+  #clickRotate(hit: PickHit, clientX: number, clientY: number): void {
+    const p = this.#pending;
+    const ids = [...this.#host.selection()];
+    if (p?.kind === "rotate") {
+      this.#cancel();
+      const degrees = this.#angle(p, p.current);
+      if (Math.abs(degrees) < 0.05) {
+        this.#host.setHint("Rotate: zero angle, nothing done.");
+        return;
+      }
+      try {
+        for (const id of ids) this.#host.session.execute(rotateSolids([id], "z", degrees, p.pivot));
+        this.#host.setHint(`Rotated ${ids.length} object(s) ${degrees.toFixed(1)} deg about Z.`);
+      } catch (err) {
+        this.#host.setHint((err as Error).message);
+      }
+      return;
+    }
+    if (ids.length === 0) {
+      this.#host.setHint("Rotate: select something first, then click the pivot.");
+      return;
+    }
+    const at =
+      hit.kind === "ground" ? this.#snap(hit.point).point : this.#host.view.groundPoint(clientX, clientY);
+    if (!at) return;
+    this.#pending = { kind: "rotate", pivot: at, from: [at[0] + 100, at[1], at[2]], current: [at[0] + 100, at[1], at[2]] };
+    this.#host.setHint("Rotate: move to set the angle, click to apply, Esc cancels");
+  }
+
+  /** Signed turn about Z, from the pivot through the start point to `to`. */
+  #angle(p: Extract<Pending, { kind: "rotate" }>, to: Vec3): number {
+    const a = Math.atan2(p.from[1] - p.pivot[1], p.from[0] - p.pivot[0]);
+    const b = Math.atan2(to[1] - p.pivot[1], to[0] - p.pivot[0]);
+    let deg = ((b - a) * 180) / Math.PI;
+    // Normalise to (-180, 180] so a small nudge never reads as 359.
+    while (deg > 180) deg -= 360;
+    while (deg <= -180) deg += 360;
+    return deg;
+  }
+
   #clickSelect(hit: PickHit, additive: boolean): void {
-    if (hit.kind === "solid") this.#host.select(additive ? [hit.id] : [hit.id]);
-    else if (hit.kind === "ground") this.#host.select([]);
+    // Shift toggles (the host flips membership); a plain click replaces.
+    if (hit.kind === "solid") this.#host.select([hit.id], additive);
+    else if (hit.kind === "ground" && !additive) this.#host.select([]);
   }
 
   /* ------------------------------------------------------------- preview */
@@ -655,10 +903,16 @@ const HINTS: Record<Tool, string> = {
   dimension: "Dimension: click the first point of the measurement",
   followme: "Follow Me: click a profile to sweep along the ground",
   offset: "Offset: click a face to inset or expand it",
+  move: "Move: click a grab point, then where it goes",
+  rotate: "Rotate: click the pivot, then drag to set the angle",
+  circle: "Circle: click the centre, then move to set the radius",
+  arc: "Arc: click the start, a point on the arc, then the end",
 };
 
 /** Ground grid used for snapping when no vertex or midpoint is near. */
 const GRID_MM = 10;
+/** Plane normal for ground-plane interactions (move/rotate). */
+const GLOSSARY_UP: Vec3 = [0, 0, 1];
 /** Height of a guide line's band, small enough to read as a line not a solid. */
 const LINE_GUIDE_WIDTH = 0.5;
 
@@ -713,3 +967,4 @@ function distance(a: Vec3, b: Vec3): number {
 function distance2(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
+

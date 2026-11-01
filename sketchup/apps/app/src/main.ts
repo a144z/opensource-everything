@@ -49,8 +49,9 @@ let gizmoMode: "translate" | "rotate" | "scale" = "translate";
 const cursor = { x: 0, y: 0 };
 
 const view = new View(viewport, session, {
-  onPick: (hit: PickHit, additive) => {
-    tools.click(hit, additive, cursor.x, cursor.y);
+  onPick: (hit: PickHit, additive, copy) => {
+    tools.click(hit, additive, cursor.x, cursor.y, copy ?? false);
+    if (hit.kind === "solid" && additive) setSelection([hit.id], true);
     renderPanel();
   },
   onHover: (point) => tools.hover(point, cursor.x, cursor.y),
@@ -72,7 +73,7 @@ const tools = new ToolController({
   setHint: (text) => {
     hint.textContent = text;
   },
-  select: (ids) => setSelection(ids),
+  select: (ids, additive) => setSelection(ids, additive ?? false),
   cursor: () => cursor,
   unit: () => unit,
   axisLocked: () => view.axisLocked,
@@ -80,6 +81,7 @@ const tools = new ToolController({
     annotations.add(note);
     renderAnnotations();
   },
+  selection: () => [...selection],
 });
 
 /* ----------------------------------------------------------- annotations */
@@ -175,8 +177,21 @@ function makeLabel(text: string, at: Vec3): THREE.Sprite {
 
 /* ------------------------------------------------------------ selection */
 
-function setSelection(ids: readonly SolidId[]): void {
-  selection = new Set(ids);
+/**
+ * Selection is a set. A plain click replaces it; Shift-click toggles one object
+ * so Move and Rotate can act on several (task L2-4c).
+ */
+function setSelection(ids: readonly SolidId[], additive = false): void {
+  if (additive) {
+    const next = new Set(selection);
+    for (const id of ids) {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    }
+    selection = next;
+  } else {
+    selection = new Set(ids);
+  }
   view.attachGizmo(selection.size === 1 ? [...selection][0]! : null);
   renderPanel();
 }
@@ -543,6 +558,18 @@ window.addEventListener("keydown", (e) => {
       break;
     case "o":
       if (!mod) selectTool("offset");
+      break;
+    case "q":
+      selectTool("move");
+      break;
+    case "i":
+      selectTool("rotate");
+      break;
+    case "c":
+      if (!mod) selectTool("circle");
+      break;
+    case "a":
+      if (!mod) selectTool("arc");
       break;
     case "g":
       setGizmo("translate");
